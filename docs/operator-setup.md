@@ -30,7 +30,7 @@ VirSree 使用服务端 OIDC Authorization Code + PKCE 流程。生产环境必�
 2. **连接第一个存储源**：选择 S3 或 WebDAV，填写容量与优先级，并执行真实读写验证。
 3. **完成**：验证通过后进入首页。
 
-验证会写入 `rosemary-system/probes/` 下的极小临时对象，并验证上传、HEAD、复制、下载和删除。任一步失败都不会保存存储源配置。生产存储凭据使用 `RVS_MASTER_KEY` 加密后才进入 SQLite，API 永远不返回明文。
+验证会写入 `virsree-system/probes/` 下的极小临时对象，并验证上传、HEAD、复制、下载和删除。任一步失败都不会保存存储源配置。S3 探针还会通过接受上传的同一 Endpoint 签发清理请求，避免地址配置错误时留下探针。生产存储凭据使用 `RVS_MASTER_KEY` 加密后才进入 SQLite，API 永远不返回明文。
 
 ## 3. 多存储源调度
 

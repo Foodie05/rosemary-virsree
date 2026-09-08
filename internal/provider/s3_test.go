@@ -2,8 +2,11 @@ package provider
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +25,39 @@ func TestPresignPutBindsDeclaredContentLength(t *testing.T) {
 	}
 	if !strings.Contains(u.Query().Get("X-Amz-SignedHeaders"), "content-length") {
 		t.Fatalf("content length is not signed: %q", u.Query().Get("X-Amz-SignedHeaders"))
+	}
+}
+
+func TestFailedProbeCleansUpThroughUploadEndpoint(t *testing.T) {
+	var uploaded, deleted atomic.Bool
+	upload := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			uploaded.Store(true)
+			w.WriteHeader(http.StatusOK)
+		case http.MethodDelete:
+			deleted.Store(true)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer upload.Close()
+	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer internal.Close()
+
+	p := New(config.Backend{Endpoint: internal.URL, PublicEndpoint: upload.URL, DownloadEndpoint: upload.URL, Region: "us-east-1", Bucket: "private-bucket", AccessKey: "synthetic", SecretKey: "synthetic-secret", PathStyle: true})
+	if err := p.Probe(context.Background()); err == nil || !strings.Contains(err.Error(), "metadata probe") {
+		t.Fatalf("expected metadata probe failure, got %v", err)
+	}
+	if !uploaded.Load() || !deleted.Load() {
+		t.Fatalf("upload endpoint cleanup was not completed: uploaded=%v deleted=%v", uploaded.Load(), deleted.Load())
 	}
 }
 

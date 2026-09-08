@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.4 — 2026-09-08
+
+- Normalize bucket-scoped S3 hosts such as `bucket.s3.example.com` back to the SDK service endpoint so the bucket is not duplicated in the object path.
+- Default new cloud S3 sources to virtual-hosted addressing while retaining an explicit Path-style option for MinIO and self-hosted services.
+- Clean failed S3 probes through the same endpoint that accepted the direct upload, preventing misconfigured endpoints from leaving probe objects behind.
+- Add request-specific guidance when a verification 404 used Path-style addressing.
+
 ## v0.2.3 — 2026-09-08
 
 - Key endpoint correlation identifiers with the server master secret so redacted logs cannot be used to enumerate likely endpoint hostnames offline.

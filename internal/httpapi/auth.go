@@ -203,6 +203,10 @@ func (s *Server) addStorageSource(w http.ResponseWriter, r *http.Request) {
 		if kind != "s3" && kind != "webdav" {
 			kind = "invalid"
 		}
+		if problem.Code == "storage_probe_not_found" && in.PathStyle {
+			problem.ZH += " 本次请求开启了 Path-style；公有云 S3 兼容服务通常需要关闭后重试。"
+			problem.EN += " Path-style was enabled for this attempt; public S3-compatible services commonly require it to be disabled."
+		}
 		slog.Warn("storage source rejected",
 			"request_id", requestID(r),
 			"error_code", problem.Code,
@@ -212,7 +216,7 @@ func (s *Server) addStorageSource(w http.ResponseWriter, r *http.Request) {
 			"cdn_endpoint_id", endpointFingerprint(in.CDNEndpoint, s.svc.Config.MasterKey),
 			"path_style", in.PathStyle,
 		)
-		fail(w, r, 400, err.Error())
+		failProblem(w, r, 400, problem)
 		return
 	}
 	s.svc.DB.Audit(r.Context(), "storage-source.created", source.ID, source.Kind)

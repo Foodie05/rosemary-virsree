@@ -51,7 +51,7 @@ func (s *S3) Probe(ctx context.Context) error {
 	if !s.ready {
 		return fmt.Errorf("S3 backend is not configured")
 	}
-	key := fmt.Sprintf("rosemary-system/probes/%d", time.Now().UnixNano())
+	key := fmt.Sprintf("virsree-system/probes/%d", time.Now().UnixNano())
 	copyKey := key + "-copy"
 	putURL, err := s.PresignPut(ctx, key, "text/plain", 5, 2*time.Minute)
 	if err != nil {
@@ -68,6 +68,7 @@ func (s *S3) Probe(ctx context.Context) error {
 	if putResp.StatusCode >= 300 {
 		return fmt.Errorf("direct upload probe: %s", putResp.Status)
 	}
+	defer s.cleanupUploadedProbe(key)
 	defer s.Delete(context.Background(), key)
 	defer s.Delete(context.Background(), copyKey)
 	if _, err = s.Head(ctx, key); err != nil {
@@ -106,6 +107,28 @@ func (s *S3) Probe(ctx context.Context) error {
 		return fmt.Errorf("delete probe: object still exists")
 	}
 	return nil
+}
+
+// cleanupUploadedProbe signs the cleanup through the same endpoint that
+// accepted the probe upload. This also removes probes when a misconfigured
+// bucket-scoped endpoint wrote the object under a duplicated bucket prefix.
+func (s *S3) cleanupUploadedProbe(key string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r, err := s.upload.PresignDeleteObject(ctx, &awss3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)}, func(o *awss3.PresignOptions) { o.Expires = 2 * time.Minute })
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, r.URL, nil)
+	if err != nil {
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	_ = resp.Body.Close()
 }
 func validTTL(ttl time.Duration) error {
 	if ttl < time.Second {

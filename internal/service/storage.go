@@ -99,6 +99,7 @@ func backendFor(kind string, c storedSourceConfig) (provider.Backend, error) {
 func (m *StorageManager) Add(ctx context.Context, in StorageSourceInput) (model.StorageSource, error) {
 	in.Name = strings.TrimSpace(in.Name)
 	in.Kind = strings.ToLower(strings.TrimSpace(in.Kind))
+	in.Bucket = strings.TrimSpace(in.Bucket)
 	var e error
 	if in.Endpoint, e = normalizeEndpoint(in.Endpoint, in.Kind == "s3"); e != nil {
 		return model.StorageSource{}, e
@@ -108,6 +109,10 @@ func (m *StorageManager) Add(ctx context.Context, in StorageSourceInput) (model.
 	}
 	if in.CDNEndpoint, e = normalizeEndpoint(in.CDNEndpoint, true); e != nil {
 		return model.StorageSource{}, fmt.Errorf("CDN endpoint: %w", e)
+	}
+	if in.Kind == "s3" {
+		in.Endpoint = normalizeS3ServiceEndpoint(in.Endpoint, in.Bucket)
+		in.PublicEndpoint = normalizeS3ServiceEndpoint(in.PublicEndpoint, in.Bucket)
 	}
 	if in.Name == "" || in.CapacityBytes <= 0 {
 		return model.StorageSource{}, errors.New("name and positive capacity_bytes are required")
@@ -141,6 +146,34 @@ func (m *StorageManager) Add(ctx context.Context, in StorageSourceInput) (model.
 	m.sources[v.ID] = sourceRuntime{v, b}
 	m.mu.Unlock()
 	return v, nil
+}
+
+// normalizeS3ServiceEndpoint repairs a common console-copy mistake. S3 SDK base
+// endpoints describe the service; the SDK adds Bucket itself. Passing a
+// bucket-scoped host such as bucket.s3.example.com would otherwise add it twice.
+func normalizeS3ServiceEndpoint(endpoint, bucket string) string {
+	if endpoint == "" || bucket == "" {
+		return endpoint
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	host := u.Hostname()
+	port := u.Port()
+	prefix := strings.ToLower(bucket) + "."
+	if !strings.HasPrefix(strings.ToLower(host), prefix) {
+		return endpoint
+	}
+	serviceHost := host[len(prefix):]
+	if !strings.HasPrefix(strings.ToLower(serviceHost), "s3.") {
+		return endpoint
+	}
+	u.Host = serviceHost
+	if port != "" {
+		u.Host += ":" + port
+	}
+	return u.String()
 }
 
 func normalizeEndpoint(raw string, optional bool) (string, error) {

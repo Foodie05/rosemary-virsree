@@ -73,7 +73,7 @@ func (w *WebDAV) Probe(ctx context.Context) error {
 	if !w.ready {
 		return errors.New("invalid WebDAV endpoint")
 	}
-	key := fmt.Sprintf("rosemary-system/probes/%d", time.Now().UnixNano())
+	key := fmt.Sprintf("virsree-system/probes/%d", time.Now().UnixNano())
 	copyKey := key + "-copy"
 	if e := w.Put(ctx, key, strings.NewReader("probe"), 5, "text/plain"); e != nil {
 		return fmt.Errorf("write probe: %w", e)

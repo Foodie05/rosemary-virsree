@@ -30,3 +30,12 @@ func TestNormalizeEndpointRejectsUnsafeOrAmbiguousInput(t *testing.T) {
 		t.Fatalf("optional empty endpoint = %q, %v", got, err)
 	}
 }
+
+func TestNormalizeS3ServiceEndpointRemovesDuplicateBucketHost(t *testing.T) {
+	if got := normalizeS3ServiceEndpoint("https://ustore.s3.bitiful.net", "ustore"); got != "https://s3.bitiful.net" {
+		t.Fatalf("bucket-scoped endpoint = %q", got)
+	}
+	if got := normalizeS3ServiceEndpoint("https://cdn.example.com", "cdn"); got != "https://cdn.example.com" {
+		t.Fatalf("custom endpoint was unexpectedly changed: %q", got)
+	}
+}

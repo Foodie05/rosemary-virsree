@@ -78,7 +78,10 @@ func requestID(r *http.Request) string {
 }
 
 func fail(w http.ResponseWriter, r *http.Request, status int, raw string) {
-	problem := errorFor(raw, status)
+	failProblem(w, r, status, errorFor(raw, status))
+}
+
+func failProblem(w http.ResponseWriter, r *http.Request, status int, problem localizedError) {
 	message := problem.EN
 	if preferChinese(r) {
 		message = problem.ZH

@@ -71,6 +71,8 @@ Create bootstrap token body:
 
 `expires_in` here is the lifetime of the one-time onboarding token. It is separate from object signature lifetimes.
 
+S3 storage-source endpoints are SDK service endpoints, such as `https://s3.example.com`. If an operator pastes a standard bucket-scoped host such as `https://media.s3.example.com` while the bucket field is `media`, VirSree removes the duplicated bucket label before verification. New cloud sources default to virtual-hosted addressing; enable Path-style explicitly for MinIO or another provider that requires it.
+
 ## Agent exchange
 
 `POST /api/v1/agent/claim` is unauthenticated except for the one-time token:
