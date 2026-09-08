@@ -8,10 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,6 +165,62 @@ func decodeMap(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 		t.Fatalf("decode %q: %v", w.Body.String(), err)
 	}
 	return out
+}
+
+func TestErrorsFollowRequestLanguageAndIncludeTraceID(t *testing.T) {
+	h := testServer(t)
+	for _, tc := range []struct {
+		language string
+		field    string
+	}{
+		{"zh-CN,zh;q=0.9,en;q=0.8", "message_zh"},
+		{"en-US,en;q=0.9", "message_en"},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/overview", nil)
+		r.Header.Set("Accept-Language", tc.language)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		got := decodeMap(t, w)
+		if w.Code != http.StatusUnauthorized || got["code"] != "admin_auth_required" {
+			t.Fatalf("unexpected error response: %d %#v", w.Code, got)
+		}
+		if got["error"] != got[tc.field] || got["message_zh"] == got["message_en"] {
+			t.Fatalf("language %q was not selected: %#v", tc.language, got)
+		}
+		if trace, _ := got["trace_id"].(string); !strings.HasPrefix(trace, "req_") || w.Header().Get("X-Request-ID") != trace {
+			t.Fatalf("missing or mismatched trace ID: %#v, header %q", got, w.Header().Get("X-Request-ID"))
+		}
+	}
+}
+
+func TestStorageProviderDetailsAreNotReturned(t *testing.T) {
+	raw := "storage verification failed: metadata probe: operation error S3: HeadObject, StatusCode: 404, RequestID: secret-request, HostID: secret-host, NotFound"
+	problem := errorFor(raw, http.StatusBadRequest)
+	if problem.Code != "storage_probe_not_found" {
+		t.Fatalf("code = %q", problem.Code)
+	}
+	if strings.Contains(problem.ZH, "secret-") || strings.Contains(problem.EN, "secret-") || strings.Contains(problem.EN, "RequestID") {
+		t.Fatalf("provider details leaked in localized error: %#v", problem)
+	}
+}
+
+func TestRequestLogRedactsPathAndQueryValues(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	h := testServer(t)
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/buckets/secret-bucket/objects?prefix=secret-object", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	output := logs.String()
+	if strings.Contains(output, "secret-bucket") || strings.Contains(output, "secret-object") {
+		t.Fatalf("request values leaked into logs: %s", output)
+	}
+	if !strings.Contains(output, "GET /api/v1/admin/buckets/{bucket}/objects") || !strings.Contains(output, "request_id=req_") || !strings.Contains(output, "error_code=admin_auth_required") {
+		t.Fatalf("missing structured request fields: %s", output)
+	}
 }
 
 func TestAdminAndOneTimeOnboarding(t *testing.T) {

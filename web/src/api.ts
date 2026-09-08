@@ -9,13 +9,19 @@ export type StorageSourceInput={name:string;kind:'s3'|'webdav';priority:number;c
 export class API{
   constructor(public token=''){}
   async call<T>(path:string,init:RequestInit={}):Promise<T>{
-    const headers:Record<string,string>={'Content-Type':'application/json',...(init.headers as Record<string,string>||{})}
+    const language=navigator.language||'en'
+    const headers:Record<string,string>={'Content-Type':'application/json','Accept-Language':language,...(init.headers as Record<string,string>||{})}
     if(this.token)headers.Authorization=`Bearer ${this.token}`
     const r=await fetch(path,{...init,credentials:'same-origin',headers})
     if(r.status===204)return undefined as T
     const data=await r.json().catch(()=>({}))
     if(r.status===401)window.dispatchEvent(new Event('rvs-unauthorized'))
-    if(!r.ok)throw new Error(data.error||`请求失败 (${r.status})`)
+    if(!r.ok){
+      const zh=language.toLowerCase().startsWith('zh')
+      const message=(zh?data.message_zh:data.message_en)||data.error||(zh?`请求失败 (${r.status})`:`Request failed (${r.status})`)
+      const trace=data.trace_id?(zh?`（追踪编号：${data.trace_id}）`:` (Trace ID: ${data.trace_id})`):''
+      throw new Error(message+trace)
+    }
     return data
   }
   session(){return this.call<Session>('/api/v1/session')}

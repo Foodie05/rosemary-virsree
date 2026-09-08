@@ -1,14 +1,14 @@
-# Rosemary VirSree：从零接入指南
+# VirSree by Rosemary：从零接入指南
 
-本文面向第一次接触 Rosemary VirSree 的应用开发者。完成后，应用只保存一组虚拟 AK/SK；真实存储凭据、物理位置、对象键和配额策略都由 Rosemary 管理。S3 文件直达真实存储或兼容 CDN；WebDAV 因没有通用预签名协议而通过短期能力地址中转。
+本文面向第一次接触 VirSree by Rosemary 的应用开发者。完成后，应用只保存一组虚拟 AK/SK；真实存储凭据、物理位置、对象键和配额策略都由 VirSree 管理。S3 文件直达真实存储或兼容 CDN；WebDAV 因没有通用预签名协议而通过短期能力地址中转。
 
 ## 1. 先分清部署实例和开源网站
 
-Rosemary VirSree 是开源软件，任何组织都可以部署自己的实例。接入时会遇到两个不同的网站：
+VirSree by Rosemary 是开源软件，任何组织都可以部署自己的实例。接入时会遇到两个不同的网站：
 
 | 网站 | 示例 | 用途 |
 |---|---|---|
-| 你的 Rosemary 部署实例 | `https://storage.example.com` | 应用实际连接的 API、虚拟 S3、健康检查和实例文档 |
+| 你的 VirSree 部署实例 | `https://storage.example.com` | 应用实际连接的 API、虚拟 S3、健康检查和实例文档 |
 | 公共开源项目 | `https://github.com/Foodie05/rosemary-virsree` | 源码、Issue、通用文档和 Release 下载 |
 
 应用的 `AWS_ENDPOINT_URL` 必须指向部署实例的 `/s3`，绝不能指向 GitHub。实例管理员可配置自己信任的源码和 Release 地址；用下面的公开接口核对：
@@ -34,7 +34,7 @@ export RVS_RELEASES=https://github.com/Foodie05/rosemary-virsree/releases
 | `https://storage.example.com/s3` | ListObjectsV2、HeadObject、GetObject、DeleteObject 的虚拟 S3 入口 | GET 会 307 到真实 S3 |
 | 响应中的短期 `url` | 上传或下载文件 | `direct=true` 直连 S3/CDN；`false` 经 WebDAV 中转 |
 
-Rosemary 的 `/s3` 不接受 `PutObject`。上传前必须先取得真实 S3 预签名 URL。
+VirSree 的 `/s3` 不接受 `PutObject`。上传前必须先取得真实 S3 预签名 URL。
 
 ## 3. 准备信息
 
@@ -183,7 +183,7 @@ client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 })
 ```
 
-不要用这些客户端向 Rosemary 调用 `PutObject`。
+不要用这些客户端向 VirSree 调用 `PutObject`。
 
 ## 8. 实现上传：签名、直传、commit
 
@@ -203,7 +203,7 @@ Content-Type: application/json
 }
 ```
 
-`size` 必须是实际字节数。`expires_in` 由当前业务选择且必须为正整数；S3 SigV4 的协议上限是 604800 秒。响应里的 `direct` 明确说明文件是否绕过 Rosemary。
+`size` 必须是实际字节数。`expires_in` 由当前业务选择且必须为正整数；S3 SigV4 的协议上限是 604800 秒。响应里的 `direct` 明确说明文件是否绕过 VirSree。
 上传签名会绑定这个 Content-Length。浏览器会依据 `Blob` / `File` 自动发送该请求头；不要尝试在前端 JavaScript 中手工设置受浏览器保护的 `Content-Length`。
 
 响应示例：
@@ -241,7 +241,7 @@ Content-Type: application/json
 {"upload_id":"obj_...","key":"invoices/2026/INV-1001.pdf"}
 ```
 
-Rosemary 会向 S3 执行 HEAD，核对大小，再将预留空间记为已使用。业务记录只能在 commit 成功后标记上传完成。
+VirSree 会向 S3 执行 HEAD，核对大小，再将预留空间记为已使用。业务记录只能在 commit 成功后标记上传完成。
 
 ## 9. 实现下载
 
@@ -254,12 +254,12 @@ Content-Type: application/json
 {"key":"invoices/2026/INV-1001.pdf","filename":"invoice.pdf","expires_in":300}
 ```
 
-响应中的 `url` 是短期文件地址。`direct=true` 时指向真实 S3 或兼容 CDN，文件不经过 Rosemary；`direct=false` 时对象位于 WebDAV，地址由 Rosemary 中转。
+响应中的 `url` 是短期文件地址。`direct=true` 时指向真实 S3 或兼容 CDN，文件不经过 VirSree；`direct=false` 时对象位于 WebDAV，地址由 VirSree 中转。
 
 ## 10. 私有链接与“公开”链接
 
 - 普通下载 URL：一次签发，直到所选时长结束。撤销虚拟 AK/SK 不会让它提前失效。
-- `/p/{slug}`：稳定的 Rosemary 地址。每次访问由平台重新签发真实 URL 并 307 跳转。
+- `/p/{slug}`：稳定的 VirSree 地址。每次访问由平台重新签发真实 URL 并 307 跳转。
 - 创建公开别名时，应用必须明确指定 `sign_expires_in`。可用 `link_expires_in` 控制别名本身的寿命；`0` 表示不设置别名到期时间。
 - 保存创建响应中的 `slug`。不再需要别名时，用 `DELETE /api/v1/buckets/{bucket}/public-links/{slug}` 立即停止后续跳转。
 - 底层 S3 桶始终保持 Private。
@@ -290,7 +290,7 @@ Content-Type: application/json
 2. rvsctl 输出中没有 AK/SK，Secret 文件权限是 0600。
 3. ListObjectsV2、HeadObject 工作。
 4. 对 `/s3/{bucket}/{key}` 直接 PUT 返回 405。
-5. 上传签名响应 URL 的主机是 S3，不是 Rosemary。
+5. 上传签名响应 URL 的主机是 S3，不是 VirSree。
 6. PUT、commit、签名下载均成功，下载最终主机是 S3。
 7. 使用不具备 write 权限的 Key 申请上传返回 403。
 8. 日志和 Git diff 中没有凭据或签名 URL。
@@ -311,6 +311,6 @@ Content-Type: application/json
 
 ## 15. 真实桶运维要求
 
-Rosemary 的正式对象使用 `rosemary/` 前缀，上传临时对象使用 `rosemary-staging/` 前缀。由于 S3 预签名 PUT 在协议上不能提前撤销，已经 commit 的上传 URL 仍可能在到期前重写其临时键，但不会影响正式对象，且 Content-Length 已绑定。请在真实桶上为 `rosemary-staging/` 配置 **8 天后删除** 的生命周期规则，以清理 URL 被复用或客户端中断产生的临时对象；8 天覆盖 SigV4 最长 7 天有效期。
+VirSree 的正式对象使用 `rosemary/` 前缀，上传临时对象使用 `rosemary-staging/` 前缀。由于 S3 预签名 PUT 在协议上不能提前撤销，已经 commit 的上传 URL 仍可能在到期前重写其临时键，但不会影响正式对象，且 Content-Length 已绑定。请在真实桶上为 `rosemary-staging/` 配置 **8 天后删除** 的生命周期规则，以清理 URL 被复用或客户端中断产生的临时对象；8 天覆盖 SigV4 最长 7 天有效期。
 
 完整字段定义见 [api.md](./api.md)，设计边界见 [architecture.md](./architecture.md)。

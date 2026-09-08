@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,13 +9,35 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"rosemary-virsree/internal/s3compat"
+	"rosemary-virsree/internal/secretbox"
 	"rosemary-virsree/internal/service"
 )
+
+type requestIDKey struct{}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(body)
+}
 
 type Server struct {
 	svc *service.Service
@@ -90,7 +113,7 @@ func (s *Server) downloadChecksums(w http.ResponseWriter, r *http.Request) {
 func (s *Server) downloadCLI(w http.ResponseWriter, r *http.Request) {
 	osName, arch := r.PathValue("os"), r.PathValue("arch")
 	if (osName != "darwin" && osName != "linux" && osName != "windows") || (arch != "amd64" && arch != "arm64") {
-		fail(w, 404, "unsupported rvsctl platform")
+		fail(w, r, 404, "unsupported rvsctl platform")
 		return
 	}
 	name := "rvsctl"
@@ -100,12 +123,12 @@ func (s *Server) downloadCLI(w http.ResponseWriter, r *http.Request) {
 	path := filepath.Join(s.svc.Config.DownloadDir, "rvsctl", osName, arch, name)
 	info, e := os.Stat(path)
 	if e != nil || info.IsDir() {
-		fail(w, 404, "rvsctl build is not available for this platform")
+		fail(w, r, 404, "rvsctl build is not available for this platform")
 		return
 	}
 	f, e := os.Open(path)
 	if e != nil {
-		fail(w, 500, e.Error())
+		fail(w, r, 500, e.Error())
 		return
 	}
 	defer f.Close()
@@ -120,7 +143,7 @@ func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
 				next(w, r)
 				return
 			}
-			fail(w, 401, "admin authentication required")
+			fail(w, r, 401, "admin authentication required")
 			return
 		}
 		next(w, r)
@@ -133,11 +156,11 @@ func (s *Server) virtual(permission string, next virtualHandler) http.HandlerFun
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, e := s.svc.Authenticate(r.Context(), r.Header.Get("X-RVS-Access-Key"), r.Header.Get("X-RVS-Secret-Key"), permission)
 		if e != nil {
-			fail(w, 403, e.Error())
+			fail(w, r, 403, e.Error())
 			return
 		}
 		if c.Bucket.Slug != r.PathValue("bucket") {
-			fail(w, 403, "credential does not control this bucket")
+			fail(w, r, 403, "credential does not control this bucket")
 			return
 		}
 		next(w, r, c)
@@ -152,14 +175,10 @@ func write(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
-func fail(w http.ResponseWriter, status int, msg string) {
-	write(w, status, map[string]any{"error": msg})
-}
-
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	v, e := s.svc.DB.Overview(r.Context())
 	if e != nil {
-		fail(w, 500, e.Error())
+		fail(w, r, 500, e.Error())
 		return
 	}
 	v["total_quota"] = s.svc.Config.TotalQuota
@@ -169,7 +188,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 func (s *Server) buckets(w http.ResponseWriter, r *http.Request) {
 	v, e := s.svc.DB.ListBuckets(r.Context())
 	if e != nil {
-		fail(w, 500, e.Error())
+		fail(w, r, 500, e.Error())
 		return
 	}
 	write(w, 200, v)
@@ -182,17 +201,17 @@ func (s *Server) createBucket(w http.ResponseWriter, r *http.Request) {
 		Quota      int64  `json:"quota_bytes"`
 	}
 	if e := decode(r, &in); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	b, e := s.svc.NewBucket(r.Context(), in.Name, in.Slug, in.Visibility, in.Quota)
 	if e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	k, secret, e := s.svc.NewKey(r.Context(), b, "owner", "read,write,delete,manage")
 	if e != nil {
-		fail(w, 500, e.Error())
+		fail(w, r, 500, e.Error())
 		return
 	}
 	write(w, 201, map[string]any{"bucket": b, "access_key": k.AK, "secret_key": secret, "shown_once": true})
@@ -200,7 +219,7 @@ func (s *Server) createBucket(w http.ResponseWriter, r *http.Request) {
 func (s *Server) keys(w http.ResponseWriter, r *http.Request) {
 	v, e := s.svc.DB.ListKeys(r.Context())
 	if e != nil {
-		fail(w, 500, e.Error())
+		fail(w, r, 500, e.Error())
 		return
 	}
 	write(w, 200, v)
@@ -208,7 +227,7 @@ func (s *Server) keys(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 	bucket, e := s.svc.DB.GetBucket(r.Context(), r.PathValue("bucket"))
 	if e != nil {
-		fail(w, 404, "virtual bucket not found")
+		fail(w, r, 404, "virtual bucket not found")
 		return
 	}
 	var in struct {
@@ -216,19 +235,19 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		Permissions []string `json:"permissions"`
 	}
 	if e = decode(r, &in); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	key, secret, e := s.svc.NewKey(r.Context(), bucket, in.Name, strings.Join(in.Permissions, ","))
 	if e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	write(w, 201, map[string]any{"id": key.ID, "bucket": bucket.Slug, "name": key.Name, "access_key": key.AK, "secret_key": secret, "permissions": strings.Split(key.Permissions, ","), "shown_once": true})
 }
 func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request) {
 	if e := s.svc.DB.RevokeKey(r.Context(), r.PathValue("id")); e != nil {
-		fail(w, 500, e.Error())
+		fail(w, r, 500, e.Error())
 		return
 	}
 	s.svc.DB.Audit(r.Context(), "access-key.revoked", r.PathValue("id"), "admin")
@@ -241,12 +260,12 @@ func (s *Server) adminCredential(r *http.Request) (service.Credential, error) {
 func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request) {
 	c, e := s.adminCredential(r)
 	if e != nil {
-		fail(w, 404, "virtual bucket not found")
+		fail(w, r, 404, "virtual bucket not found")
 		return
 	}
 	objects, e := s.svc.DB.ListObjects(r.Context(), c.Bucket.ID, r.URL.Query().Get("prefix"))
 	if e != nil {
-		fail(w, 500, e.Error())
+		fail(w, r, 500, e.Error())
 		return
 	}
 	write(w, 200, objects)
@@ -254,7 +273,7 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request) {
 func (s *Server) adminDownload(w http.ResponseWriter, r *http.Request) {
 	c, e := s.adminCredential(r)
 	if e != nil {
-		fail(w, 404, "virtual bucket not found")
+		fail(w, r, 404, "virtual bucket not found")
 		return
 	}
 	var in struct {
@@ -262,12 +281,12 @@ func (s *Server) adminDownload(w http.ResponseWriter, r *http.Request) {
 		ExpiresIn int64  `json:"expires_in"`
 	}
 	if e = decode(r, &in); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	u, e := s.svc.DownloadURL(r.Context(), c, in.Key, in.ExpiresIn, "")
 	if e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	o, _ := s.svc.DB.GetObject(r.Context(), c.Bucket.ID, in.Key)
@@ -276,18 +295,18 @@ func (s *Server) adminDownload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) adminInvalidateLinks(w http.ResponseWriter, r *http.Request) {
 	c, e := s.adminCredential(r)
 	if e != nil {
-		fail(w, 404, "virtual bucket not found")
+		fail(w, r, 404, "virtual bucket not found")
 		return
 	}
 	var in struct {
 		Key string `json:"key"`
 	}
 	if e = decode(r, &in); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	if e = s.svc.RotateObjectKey(r.Context(), c, in.Key); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	write(w, 200, map[string]any{"status": "invalidated"})
@@ -295,11 +314,11 @@ func (s *Server) adminInvalidateLinks(w http.ResponseWriter, r *http.Request) {
 func (s *Server) adminDeleteObject(w http.ResponseWriter, r *http.Request) {
 	c, e := s.adminCredential(r)
 	if e != nil {
-		fail(w, 404, "virtual bucket not found")
+		fail(w, r, 404, "virtual bucket not found")
 		return
 	}
 	if e = s.svc.Delete(r.Context(), c, r.PathValue("key")); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -311,12 +330,12 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		ExpiresIn int64  `json:"expires_in"`
 	}
 	if e := decode(r, &in); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	raw, t, e := s.svc.CreateBootstrap(r.Context(), in.Name, in.MaxQuota, time.Duration(in.ExpiresIn)*time.Second)
 	if e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	write(w, 201, map[string]any{"token": raw, "expires_at": t.ExpiresAt, "max_quota_bytes": t.MaxQuota, "shown_once": true, "project_url": s.svc.Config.ProjectURL, "release_url": s.svc.Config.ReleaseURL})
@@ -330,12 +349,12 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
 		Quota      int64  `json:"quota_bytes"`
 	}
 	if e := decode(r, &in); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	b, k, secret, e := s.svc.Claim(r.Context(), in.Token, in.Name, in.Slug, in.Visibility, in.Quota)
 	if e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	write(w, 201, map[string]any{"bucket": b.Slug, "endpoint": s.svc.Config.PublicURL + "/s3", "region": s.svc.Config.Backend.Region, "access_key": k.AK, "secret_key": secret, "shown_once": true, "permissions": strings.Split(k.Permissions, ",")})
@@ -348,12 +367,12 @@ func (s *Server) beginUpload(w http.ResponseWriter, r *http.Request, c service.C
 		ExpiresIn   int64  `json:"expires_in"`
 	}
 	if e := decode(r, &in); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	o, u, e := s.svc.BeginUpload(r.Context(), c, in.Key, in.ContentType, in.Size, in.ExpiresIn)
 	if e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	write(w, 201, map[string]any{"upload_id": o.ID, "method": "PUT", "url": u, "expires_in": in.ExpiresIn, "expected_size": in.Size, "direct": s.svc.Storage.Direct(o.SourceID), "required_headers": map[string]string{"Content-Type": in.ContentType}, "commit_url": fmt.Sprintf("%s/api/v1/buckets/%s/objects/commit", s.svc.Config.PublicURL, c.Bucket.Slug)})
@@ -364,12 +383,12 @@ func (s *Server) commit(w http.ResponseWriter, r *http.Request, c service.Creden
 		Key      string `json:"key"`
 	}
 	if e := decode(r, &in); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	o, e := s.svc.CommitUpload(r.Context(), c, in.UploadID, in.Key)
 	if e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	write(w, 200, o)
@@ -381,12 +400,12 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request, c service.Cred
 		ExpiresIn int64  `json:"expires_in"`
 	}
 	if e := decode(r, &in); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	u, e := s.svc.DownloadURL(r.Context(), c, in.Key, in.ExpiresIn, in.Filename)
 	if e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	o, _ := s.svc.DB.GetObject(r.Context(), c.Bucket.ID, in.Key)
@@ -399,12 +418,12 @@ func (s *Server) publicLink(w http.ResponseWriter, r *http.Request, c service.Cr
 		LinkExpiresIn int64  `json:"link_expires_in"`
 	}
 	if e := decode(r, &in); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	slug, stable, direct, e := s.svc.NewPublicLink(r.Context(), c, in.Key, in.SignExpiresIn, in.LinkExpiresIn)
 	if e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	o, _ := s.svc.DB.GetObject(r.Context(), c.Bucket.ID, in.Key)
@@ -413,10 +432,10 @@ func (s *Server) publicLink(w http.ResponseWriter, r *http.Request, c service.Cr
 func (s *Server) revokePublicLink(w http.ResponseWriter, r *http.Request, c service.Credential) {
 	if e := s.svc.RevokePublicLink(r.Context(), c, r.PathValue("slug")); e != nil {
 		if service.IsNotFound(e) {
-			fail(w, 404, "public link not found")
+			fail(w, r, 404, "public link not found")
 			return
 		}
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -426,18 +445,18 @@ func (s *Server) invalidateLinks(w http.ResponseWriter, r *http.Request, c servi
 		Key string `json:"key"`
 	}
 	if e := decode(r, &in); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	if e := s.svc.RotateObjectKey(r.Context(), c, in.Key); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	write(w, 200, map[string]any{"status": "invalidated", "note": "previous direct URLs target a deleted physical key"})
 }
 func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request, c service.Credential) {
 	if e := s.svc.Delete(r.Context(), c, r.PathValue("key")); e != nil {
-		fail(w, 400, e.Error())
+		fail(w, r, 400, e.Error())
 		return
 	}
 	w.WriteHeader(204)
@@ -445,7 +464,7 @@ func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request, c service.
 func (s *Server) publicRedirect(w http.ResponseWriter, r *http.Request) {
 	u, e := s.svc.ResolvePublic(r.Context(), r.PathValue("slug"))
 	if e != nil {
-		fail(w, 404, "link unavailable")
+		fail(w, r, 404, "link unavailable")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -481,7 +500,23 @@ func securityHeaders(next http.Handler) http.Handler {
 func (s *Server) log(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		slog.Info("request", "method", r.Method, "path", r.URL.Path, "duration", time.Since(start), "request_id", strconv.FormatInt(time.Now().UnixNano(), 36))
+		id := secretbox.Random("req_", 10)
+		w.Header().Set("X-Request-ID", id)
+		r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id))
+		recorded := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(recorded, r)
+		status := recorded.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		route := r.Pattern
+		if route == "" {
+			route = "unmatched"
+		}
+		attrs := []any{"method", r.Method, "route", route, "status", status, "duration", time.Since(start), "request_id", id}
+		if code := w.Header().Get("X-VirSree-Error-Code"); code != "" {
+			attrs = append(attrs, "error_code", code)
+		}
+		slog.Info("request", attrs...)
 	})
 }

@@ -110,10 +110,10 @@ func (w *WebDAV) Probe(ctx context.Context) error {
 	return nil
 }
 func (w *WebDAV) PresignPut(context.Context, string, string, int64, time.Duration) (string, error) {
-	return "", errors.New("WebDAV does not support presigned PUT; Rosemary relay is required")
+	return "", errors.New("WebDAV does not support presigned PUT; VirSree relay is required")
 }
 func (w *WebDAV) PresignGet(context.Context, string, time.Duration, string) (string, error) {
-	return "", errors.New("WebDAV does not support presigned GET; Rosemary relay is required")
+	return "", errors.New("WebDAV does not support presigned GET; VirSree relay is required")
 }
 func (w *WebDAV) Head(ctx context.Context, key string) (Head, error) {
 	r, e := w.request(ctx, "HEAD", key, nil, nil)

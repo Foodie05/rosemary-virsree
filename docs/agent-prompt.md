@@ -3,10 +3,10 @@
 管理台的 **Agent 接入** 页面会把下面的占位符替换为当前实例地址、可信 Release 地址、一次性 Token 和空间上限。请复制管理台生成的版本；不要手工把示例 Token 当成真实凭据。
 
 ```text
-你负责把当前陌生应用完整接入 Rosemary VirSree 对象存储。不要只给建议；请检查项目、实现适配、运行验证，并在无法自动判断业务选择时才询问我。
+你负责把当前陌生应用完整接入 VirSree by Rosemary 对象存储。不要只给建议；请检查项目、实现适配、运行验证，并在无法自动判断业务选择时才询问我。
 
 【本次接入参数】
-- Rosemary 部署实例（所有存储 API 和 S3 endpoint 都配置到这里）：{{GATEWAY}}
+- VirSree 部署实例（所有存储 API 和 S3 endpoint 都配置到这里）：{{GATEWAY}}
 - 开源项目（只用于源码、Issue 和通用说明，不能作为存储 endpoint）：{{PROJECT_URL}}
 - 可信 CLI Releases（只用于下载 rvsctl）：{{RELEASE_URL}}
 - 一次性 Bootstrap Token：{{BOOTSTRAP_TOKEN}}
@@ -75,10 +75,10 @@ rvsctl 会创建虚拟桶，把 AWS_ENDPOINT_URL、AWS_REGION、AWS_ACCESS_KEY_I
 五、实现应用适配
 1. S3 SDK endpoint 使用 {{GATEWAY}}/s3，启用 path-style，并加载 rvsctl 写入的 region、AK/SK 和桶名。
 2. ListObjectsV2、HeadObject、GetObject、DeleteObject 可走 S3 SDK；具体能力仍受 Key 的独立权限控制。
-3. 禁止对 Rosemary 的 /s3 调用 PutObject，禁止把上传文件正文发送给 Rosemary。
+3. 禁止对 VirSree 的 /s3 调用 PutObject，禁止把上传文件正文发送给 VirSree。
 4. 上传严格执行三步：
    a. POST {{GATEWAY}}/api/v1/buckets/{bucket}/objects/upload。用 X-RVS-Access-Key 和 X-RVS-Secret-Key 认证，JSON 提交 key、准确 size、content_type 和当前业务选择的 expires_in。
-   b. 把文件 PUT 到响应中的短期 url，并原样带上 required_headers。S3 来源时它是真实 S3 地址；WebDAV 来源时它是 Rosemary 中转能力地址。不要记录或持久化该 URL。
+   b. 把文件 PUT 到响应中的短期 url，并原样带上 required_headers。S3 来源时它是真实 S3 地址；WebDAV 来源时它是 VirSree 中转能力地址。不要记录或持久化该 URL。
    c. PUT 成功后 POST 响应中的 commit_url，提交 upload_id 和 key。只有 commit 成功才向业务层报告上传完成。
 5. 下载调用 POST {{GATEWAY}}/api/v1/buckets/{bucket}/objects/download，提交 key、可选 filename 和当前业务选择的 expires_in；检查响应 direct：true 表示真实 S3/CDN 直链；false 表示 WebDAV 中转能力地址。
 6. “公开链接”调用 .../objects/public-link 创建，也要明确提交 sign_expires_in，并保存返回的 slug；撤销时调用 DELETE .../public-links/{slug}。底层桶始终 Private。
@@ -90,7 +90,7 @@ rvsctl 会创建虚拟桶，把 AWS_ENDPOINT_URL、AWS_REGION、AWS_ACCESS_KEY_I
 1. ListObjectsV2 能列出虚拟桶。
 2. HeadObject 对不存在对象返回正确的不存在语义。
 3. 直接向 {{GATEWAY}}/s3/{bucket}/{key} PUT 返回 405。
-4. 检查响应 direct；为 true 时 url 主机不是 Rosemary，为 false 时确认平台配置的是 WebDAV 中转。
+4. 检查响应 direct；为 true 时 url 主机不是 VirSree，为 false 时确认平台配置的是 WebDAV 中转。
 5. PUT 到响应 URL 后 commit 成功，HEAD 显示正确大小和类型。
 6. 申请 60 秒下载能力且内容一致；按 direct 验证 S3/CDN 直达或 WebDAV 中转。
 7. 若有 delete 权限，删除测试对象并确认列表中消失。

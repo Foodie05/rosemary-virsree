@@ -1,9 +1,9 @@
 type PromptInput={gateway:string;token:string;quotaGB:number;expiresAt?:string;projectURL:string;releaseURL:string};
 
-export function buildAgentPrompt(v:PromptInput){return `你负责把当前陌生应用完整接入 Rosemary VirSree 对象存储。不要只给建议；请检查项目、实现适配、运行验证，并在遇到无法自动判断的业务选择时才询问我。
+export function buildAgentPrompt(v:PromptInput){return `你负责把当前陌生应用完整接入 VirSree by Rosemary 对象存储。不要只给建议；请检查项目、实现适配、运行验证，并在遇到无法自动判断的业务选择时才询问我。
 
 【本次接入参数】
-- Rosemary 实例（所有存储 API 和 S3 endpoint 都配置到这里）：${v.gateway}
+- VirSree 实例（所有存储 API 和 S3 endpoint 都配置到这里）：${v.gateway}
 - 开源项目（只用于源码、Issue 和通用说明，不能作为存储 endpoint）：${v.projectURL}
 - 官方 CLI Releases（只用于下载 rvsctl）：${v.releaseURL}
 - 一次性 Bootstrap Token：${v.token}
@@ -65,12 +65,12 @@ rvsctl 会创建虚拟桶并把 AWS_ENDPOINT_URL、AWS_REGION、AWS_ACCESS_KEY_I
 
 五、实现应用适配
 1. 列表、HEAD、签名 GET 和 DELETE 可以使用 S3 SDK，endpoint 为 ${v.gateway}/s3，必须启用 path-style，bucket 为 RVS_BUCKET。
-2. 禁止对 Rosemary 的 /s3 端点调用 PutObject。禁止把上传文件正文发送给 Rosemary。
+2. 禁止对 VirSree 的 /s3 端点调用 PutObject。禁止把上传文件正文发送给 VirSree。
 3. 上传必须严格执行：
    a. POST ${v.gateway}/api/v1/buckets/{bucket}/objects/upload，使用 X-RVS-Access-Key / X-RVS-Secret-Key，JSON 提交 key、准确 size、content_type 和由应用按业务决定的 expires_in。
-   b. 把文件 PUT 到响应中的短期 url，并带上响应要求的 headers。S3 来源时该地址是真实 S3/CDN；WebDAV 来源时是 Rosemary 中转能力地址。不要记录该 URL。
+   b. 把文件 PUT 到响应中的短期 url，并带上响应要求的 headers。S3 来源时该地址是真实 S3/CDN；WebDAV 来源时是 VirSree 中转能力地址。不要记录该 URL。
    c. PUT 成功后 POST 响应中的 commit_url，提交 upload_id 和 key。只有 commit 成功才向业务层报告上传完成。
-4. 下载可 POST .../objects/download，提交 key、可选 filename 和应用选择的 expires_in。检查响应 direct：true 表示真实 S3/CDN 直链，false 表示当前对象来自 WebDAV、文件会经 Rosemary 短期能力地址中转。
+4. 下载可 POST .../objects/download，提交 key、可选 filename 和应用选择的 expires_in。检查响应 direct：true 表示真实 S3/CDN 直链，false 表示当前对象来自 WebDAV、文件会经 VirSree 短期能力地址中转。
 5. “公开链接”也必须由应用调用 .../objects/public-link 创建，并明确提交 sign_expires_in、保存返回的 slug；撤销时调用 DELETE .../public-links/{slug}。底层桶始终 Private。
 6. 不要在应用中设置一个平台统一签名时长。每次签名都由当前业务场景选择；必须是正整数；S3 SigV4 的协议上限为 604800 秒。
 7. 对网络失败实现有限重试。不要在 PUT 成功、commit 状态未知时盲目申请另一上传；先按文档处理状态，避免预留空间和重复对象。
@@ -78,7 +78,7 @@ rvsctl 会创建虚拟桶并把 AWS_ENDPOINT_URL、AWS_REGION、AWS_ACCESS_KEY_I
 六、完成验证
 使用不含隐私的小文件验证：
 1. ListObjectsV2 能列出虚拟桶。
-2. 检查响应 direct；为 true 时 URL 主机不是 Rosemary，为 false 时确认平台配置的是 WebDAV 中转。
+2. 检查响应 direct；为 true 时 URL 主机不是 VirSree，为 false 时确认平台配置的是 WebDAV 中转。
 3. PUT 到响应 URL 后 commit 成功，并记录 direct 的布尔值。
 4. HEAD 显示正确大小和类型。
 5. 申请 60 秒下载能力并读取内容；direct=true 时确认最终主机是 S3/CDN，direct=false 时确认是预期的 WebDAV 中转。

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -44,7 +45,7 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) oidcLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.svc.Config.OIDCReady() {
-		fail(w, http.StatusServiceUnavailable, "OIDC is not configured")
+		fail(w, r, http.StatusServiceUnavailable, "OIDC is not configured")
 		return
 	}
 	state := secretbox.Random("", 32)
@@ -52,7 +53,7 @@ func (s *Server) oidcLogin(w http.ResponseWriter, r *http.Request) {
 	verifier := secretbox.Random("", 48)
 	challenge := sha256.Sum256([]byte(verifier))
 	if err := s.svc.DB.SaveOIDCChallenge(r.Context(), secretbox.Hash(state), nonce, verifier, time.Now().Add(10*time.Minute).UTC()); err != nil {
-		fail(w, http.StatusInternalServerError, "could not start login")
+		fail(w, r, http.StatusInternalServerError, "could not start login")
 		return
 	}
 	q := url.Values{
@@ -69,21 +70,21 @@ func (s *Server) oidcLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
-	failRedirect := func(message string) {
-		http.Redirect(w, r, "/?auth_error="+url.QueryEscape(message), http.StatusFound)
+	failRedirect := func(zh, en string) {
+		http.Redirect(w, r, "/?auth_error="+url.QueryEscape(localText(r, zh, en)), http.StatusFound)
 	}
 	if providerErr := r.URL.Query().Get("error"); providerErr != "" {
-		failRedirect("登录被拒绝：" + providerErr)
+		failRedirect("身份服务拒绝了登录请求，请重试。", "The identity provider denied the sign-in request. Try again.")
 		return
 	}
 	code, state := r.URL.Query().Get("code"), r.URL.Query().Get("state")
 	if code == "" || state == "" {
-		failRedirect("登录回调缺少 code 或 state")
+		failRedirect("登录回调缺少必要参数，请重新登录。", "The sign-in callback is missing required parameters. Sign in again.")
 		return
 	}
 	nonce, verifier, err := s.svc.DB.ConsumeOIDCChallenge(r.Context(), secretbox.Hash(state))
 	if err != nil {
-		failRedirect("登录请求已过期，请重新登录")
+		failRedirect("登录请求已过期，请重新登录。", "The sign-in request has expired. Sign in again.")
 		return
 	}
 	payload := map[string]string{
@@ -97,7 +98,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	tokenReq.Header.Set("Content-Type", "application/json")
 	tokenResp, err := client.Do(tokenReq)
 	if err != nil {
-		failRedirect("无法连接身份服务")
+		failRedirect("暂时无法连接身份服务，请稍后重试。", "The identity provider is temporarily unreachable. Try again later.")
 		return
 	}
 	defer tokenResp.Body.Close()
@@ -106,23 +107,23 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		IDToken     string `json:"id_token"`
 	}
 	if tokenResp.StatusCode >= 300 || json.NewDecoder(io.LimitReader(tokenResp.Body, 1<<20)).Decode(&token) != nil || token.AccessToken == "" {
-		failRedirect("身份服务未能交换登录凭据")
+		failRedirect("身份服务未能完成凭据交换，请重新登录。", "The identity provider could not complete the credential exchange. Sign in again.")
 		return
 	}
 	if token.IDToken == "" {
-		failRedirect("身份服务未返回 ID Token")
+		failRedirect("身份服务没有返回 ID Token，请联系管理员。", "The identity provider did not return an ID Token. Contact the administrator.")
 		return
 	}
 	idSubject, err := verifyIDToken(r.Context(), client, token.IDToken, s.svc.Config.OIDCIssuer, s.svc.Config.OIDCClientID, nonce)
 	if err != nil {
-		failRedirect("ID Token 校验失败")
+		failRedirect("ID Token 校验失败，请重新登录。", "ID Token validation failed. Sign in again.")
 		return
 	}
 	userinfoReq, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, s.svc.Config.OIDCIssuer+"/oidc/userinfo", nil)
 	userinfoReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
 	userinfoResp, err := client.Do(userinfoReq)
 	if err != nil {
-		failRedirect("无法读取登录用户资料")
+		failRedirect("无法读取登录用户资料，请稍后重试。", "The user profile could not be read. Try again later.")
 		return
 	}
 	defer userinfoResp.Body.Close()
@@ -132,22 +133,22 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		EmailVerified *bool  `json:"email_verified"`
 	}
 	if userinfoResp.StatusCode >= 300 || json.NewDecoder(io.LimitReader(userinfoResp.Body, 1<<20)).Decode(&user) != nil || user.Subject == "" || user.Subject != idSubject || user.Email == "" {
-		failRedirect("身份服务未返回有效邮箱")
+		failRedirect("身份服务没有返回有效邮箱，请联系管理员。", "The identity provider did not return a valid email address. Contact the administrator.")
 		return
 	}
 	if user.EmailVerified != nil && !*user.EmailVerified {
-		failRedirect("邮箱尚未验证")
+		failRedirect("该邮箱尚未完成验证。", "This email address has not been verified.")
 		return
 	}
 	email := strings.ToLower(strings.TrimSpace(user.Email))
 	if !containsFold(s.svc.Config.AdminEmails, email) {
-		failRedirect("该邮箱不在管理白名单")
+		failRedirect("该邮箱不在 VirSree 管理员白名单中。", "This email address is not on the VirSree administrator allowlist.")
 		return
 	}
 	rawSession := secretbox.Random("rvs_session_", 32)
 	expires := time.Now().Add(time.Duration(s.svc.Config.SessionTTL) * time.Second).UTC()
 	if err = s.svc.DB.CreateAdminSession(r.Context(), secretbox.Hash(rawSession), email, expires); err != nil {
-		failRedirect("无法创建管理会话")
+		failRedirect("暂时无法创建管理会话，请稍后重试。", "The administrator session could not be created. Try again later.")
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: adminCookie, Value: rawSession, Path: "/", HttpOnly: true, Secure: strings.HasPrefix(s.svc.Config.PublicURL, "https://"), SameSite: http.SameSiteLaxMode, Expires: expires, MaxAge: int(s.svc.Config.SessionTTL)})
@@ -174,7 +175,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 	sources, err := s.svc.Storage.List(r.Context())
 	if err != nil {
-		fail(w, 500, err.Error())
+		fail(w, r, 500, err.Error())
 		return
 	}
 	write(w, 200, map[string]any{"configured": len(sources) > 0, "storage_source_count": len(sources)})
@@ -183,7 +184,7 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) storageSources(w http.ResponseWriter, r *http.Request) {
 	sources, err := s.svc.Storage.List(r.Context())
 	if err != nil {
-		fail(w, 500, err.Error())
+		fail(w, r, 500, err.Error())
 		return
 	}
 	write(w, 200, sources)
@@ -192,12 +193,22 @@ func (s *Server) storageSources(w http.ResponseWriter, r *http.Request) {
 func (s *Server) addStorageSource(w http.ResponseWriter, r *http.Request) {
 	var in service.StorageSourceInput
 	if err := decode(r, &in); err != nil {
-		fail(w, 400, err.Error())
+		fail(w, r, 400, err.Error())
 		return
 	}
 	source, err := s.svc.Storage.Add(r.Context(), in)
 	if err != nil {
-		fail(w, 400, err.Error())
+		problem := errorFor(err.Error(), http.StatusBadRequest)
+		slog.Warn("storage source rejected",
+			"request_id", requestID(r),
+			"error_code", problem.Code,
+			"storage_kind", strings.ToLower(strings.TrimSpace(in.Kind)),
+			"endpoint_id", endpointFingerprint(in.Endpoint),
+			"public_endpoint_id", endpointFingerprint(in.PublicEndpoint),
+			"cdn_endpoint_id", endpointFingerprint(in.CDNEndpoint),
+			"path_style", in.PathStyle,
+		)
+		fail(w, r, 400, err.Error())
 		return
 	}
 	s.svc.DB.Audit(r.Context(), "storage-source.created", source.ID, source.Kind)
@@ -206,11 +217,11 @@ func (s *Server) addStorageSource(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) transferUpload(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength < 0 {
-		fail(w, http.StatusLengthRequired, "Content-Length is required")
+		fail(w, r, http.StatusLengthRequired, "Content-Length is required")
 		return
 	}
 	if err := s.svc.RelayUpload(r.Context(), r.PathValue("token"), r.Body, r.ContentLength); err != nil {
-		fail(w, http.StatusBadRequest, err.Error())
+		fail(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -219,7 +230,7 @@ func (s *Server) transferUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) transferDownload(w http.ResponseWriter, r *http.Request) {
 	body, head, err := s.svc.RelayDownload(r.Context(), r.PathValue("token"))
 	if err != nil {
-		fail(w, http.StatusNotFound, err.Error())
+		fail(w, r, http.StatusNotFound, err.Error())
 		return
 	}
 	defer body.Close()

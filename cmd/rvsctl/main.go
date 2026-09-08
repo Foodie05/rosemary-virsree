@@ -28,7 +28,7 @@ type result struct {
 }
 
 func main() {
-	endpoint := flag.String("endpoint", "http://127.0.0.1:8080", "central Rosemary VirSree gateway")
+	endpoint := flag.String("endpoint", "http://127.0.0.1:8080", "central VirSree gateway")
 	token := flag.String("token", "", "one-time bootstrap token")
 	name := flag.String("name", "Application bucket", "display name")
 	slug := flag.String("bucket", "", "virtual bucket name")

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -98,6 +99,16 @@ func backendFor(kind string, c storedSourceConfig) (provider.Backend, error) {
 func (m *StorageManager) Add(ctx context.Context, in StorageSourceInput) (model.StorageSource, error) {
 	in.Name = strings.TrimSpace(in.Name)
 	in.Kind = strings.ToLower(strings.TrimSpace(in.Kind))
+	var e error
+	if in.Endpoint, e = normalizeEndpoint(in.Endpoint, in.Kind == "s3"); e != nil {
+		return model.StorageSource{}, e
+	}
+	if in.PublicEndpoint, e = normalizeEndpoint(in.PublicEndpoint, true); e != nil {
+		return model.StorageSource{}, fmt.Errorf("public endpoint: %w", e)
+	}
+	if in.CDNEndpoint, e = normalizeEndpoint(in.CDNEndpoint, true); e != nil {
+		return model.StorageSource{}, fmt.Errorf("CDN endpoint: %w", e)
+	}
 	if in.Name == "" || in.CapacityBytes <= 0 {
 		return model.StorageSource{}, errors.New("name and positive capacity_bytes are required")
 	}
@@ -130,6 +141,42 @@ func (m *StorageManager) Add(ctx context.Context, in StorageSourceInput) (model.
 	m.sources[v.ID] = sourceRuntime{v, b}
 	m.mu.Unlock()
 	return v, nil
+}
+
+func normalizeEndpoint(raw string, optional bool) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		if optional {
+			return "", nil
+		}
+		return "", errors.New("endpoint is required")
+	}
+	value = strings.TrimLeft(value, ".")
+	switch {
+	case strings.HasPrefix(value, "https//"):
+		value = "https://" + strings.TrimPrefix(value, "https//")
+	case strings.HasPrefix(value, "http//"):
+		value = "http://" + strings.TrimPrefix(value, "http//")
+	case strings.HasPrefix(value, "https:/") && !strings.HasPrefix(value, "https://"):
+		value = "https://" + strings.TrimPrefix(value, "https:/")
+	case strings.HasPrefix(value, "http:/") && !strings.HasPrefix(value, "http://"):
+		value = "http://" + strings.TrimPrefix(value, "http:/")
+	case strings.HasPrefix(value, "//"):
+		value = "https:" + value
+	case !strings.Contains(value, "://"):
+		value = "https://" + value
+	}
+	u, err := url.Parse(value)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("endpoint format is invalid; enter a domain such as s3.example.com or a complete HTTP(S) URL")
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.TrimLeft(u.Host, ".")
+	if u.Host == "" {
+		return "", errors.New("endpoint format is invalid; enter a domain such as s3.example.com or a complete HTTP(S) URL")
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	return u.String(), nil
 }
 func (m *StorageManager) Ready() bool {
 	m.mu.RLock()

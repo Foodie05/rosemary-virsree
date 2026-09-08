@@ -1,6 +1,20 @@
 # Gateway API
 
-The examples use one gateway origin, such as `https://storage.example.com`. JSON errors have the shape `{"error":"..."}`.
+The examples use one gateway origin, such as `https://storage.example.com`. Send the user's locale in `Accept-Language`. VirSree chooses Chinese for languages beginning with `zh` and English otherwise, while always returning both translations:
+
+```json
+{
+  "error": "VirSree 已连接到存储服务，但找不到刚上传的验证对象……",
+  "code": "storage_probe_not_found",
+  "message_zh": "VirSree 已连接到存储服务，但找不到刚上传的验证对象……",
+  "message_en": "VirSree reached the storage service but could not find the verification object…",
+  "trace_id": "req_..."
+}
+```
+
+`error` contains the selected language for backward compatibility. Applications should use `code` for program logic and show `error` to the user. Report `trace_id` when an operator needs to investigate; provider responses, credentials and signed URLs are never returned in the error body.
+
+The `/s3` compatibility endpoint keeps the standard XML error shape expected by S3 SDKs. Its `Code` remains machine-readable, `Message` follows `Accept-Language`, and `RequestID` matches the `X-Request-ID` response header. Provider internals are omitted there as well.
 
 ## Authentication
 
@@ -85,9 +99,9 @@ It returns the gateway S3 endpoint, virtual bucket, region, virtual AK/SK, and p
 | `manage` | `POST` | `/api/v1/buckets/{bucket}/objects/invalidate-links` | `key` |
 | `delete` | `DELETE` | `/api/v1/buckets/{bucket}/objects/{key...}` | none |
 
-Every capability request requires an application-selected positive expiry. S3-compatible backends using SigV4 cap it at 604800 seconds. Rosemary does not shorten a valid requested duration. Responses include `direct`: S3 is `true`; generic WebDAV is `false` because the capability URL relays bytes through Rosemary.
+Every capability request requires an application-selected positive expiry. S3-compatible backends using SigV4 cap it at 604800 seconds. VirSree does not shorten a valid requested duration. Responses include `direct`: S3 is `true`; generic WebDAV is `false` because the capability URL relays bytes through VirSree.
 
-The public-link response contains `slug`, `public_url`, and `direct_url`. `public_url` is a Rosemary alias that can keep working until `link_expires_in`; each visit redirects to a new real URL valid for `sign_expires_in`. Revoke it with the `slug`. Already issued `direct_url` values bypass Rosemary and remain usable until their chosen expiry unless the object physical key is rotated.
+The public-link response contains `slug`, `public_url`, and `direct_url`. `public_url` is a VirSree alias that can keep working until `link_expires_in`; each visit redirects to a new real URL valid for `sign_expires_in`. Revoke it with the `slug`. Already issued `direct_url` values bypass VirSree and remain usable until their chosen expiry unless the object physical key is rotated.
 
 ## S3 endpoint
 

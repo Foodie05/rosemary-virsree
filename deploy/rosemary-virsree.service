@@ -1,5 +1,5 @@
 [Unit]
-Description=Rosemary VirSree storage gateway
+Description=VirSree storage gateway by Rosemary
 After=network-online.target
 Wants=network-online.target
 
