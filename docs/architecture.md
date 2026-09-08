@@ -1,12 +1,12 @@
 # Architecture decisions
 
-## One real private bucket
+## Multiple private storage sources
 
-Every virtual bucket maps to a prefix-independent opaque namespace inside one infrastructure-owned private bucket. Logical object names are stored in SQLite and never determine authorization by raw prefix matching alone.
+Virtual buckets are independent of physical storage sources. Each object records the source that owns its opaque physical key. New uploads try enabled sources by ascending priority and fall through when a source lacks reserved capacity. S3 and WebDAV are supported; adding either performs a write, read, copy and delete probe before encrypted configuration is committed.
 
 ## Split control and data paths
 
-The Go gateway handles identity, permission checks, quotas, object mapping, audit records and signatures. It does not proxy file bodies. This keeps gateway bandwidth predictable and lets S3 handle range requests, checksums and transfer scaling.
+The Go gateway handles identity, permission checks, quotas, object mapping, audit records and signatures. S3 file bodies use presigned direct URLs and do not cross the gateway. Generic WebDAV has no presigned-URL standard, so its short-lived upload/download capability URLs relay bytes through Rosemary.
 
 Standard `PutObject` is disabled on the virtual `/s3` endpoint. Applications request an upload signature with the control API and PUT bytes only to the returned real S3 staging URL. The signature binds the declared content length. On commit, Rosemary verifies the staging object, copies it to a fresh final physical key, switches the logical mapping, and deletes staging. Reusing an unexpired upload URL therefore cannot overwrite the committed object or upload more bytes than reserved.
 

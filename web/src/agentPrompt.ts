@@ -68,25 +68,25 @@ rvsctl 会创建虚拟桶并把 AWS_ENDPOINT_URL、AWS_REGION、AWS_ACCESS_KEY_I
 2. 禁止对 Rosemary 的 /s3 端点调用 PutObject。禁止把上传文件正文发送给 Rosemary。
 3. 上传必须严格执行：
    a. POST ${v.gateway}/api/v1/buckets/{bucket}/objects/upload，使用 X-RVS-Access-Key / X-RVS-Secret-Key，JSON 提交 key、准确 size、content_type 和由应用按业务决定的 expires_in。
-   b. 只把文件 PUT 到响应中的真实 S3 url，并带上响应要求的 headers。不要记录该 URL。
+   b. 把文件 PUT 到响应中的短期 url，并带上响应要求的 headers。S3 来源时该地址是真实 S3/CDN；WebDAV 来源时是 Rosemary 中转能力地址。不要记录该 URL。
    c. PUT 成功后 POST 响应中的 commit_url，提交 upload_id 和 key。只有 commit 成功才向业务层报告上传完成。
-4. 下载可 POST .../objects/download，提交 key、可选 filename 和应用选择的 expires_in。返回 url 是真实 S3 地址。
+4. 下载可 POST .../objects/download，提交 key、可选 filename 和应用选择的 expires_in。检查响应 direct：true 表示真实 S3/CDN 直链，false 表示当前对象来自 WebDAV、文件会经 Rosemary 短期能力地址中转。
 5. “公开链接”也必须由应用调用 .../objects/public-link 创建，并明确提交 sign_expires_in、保存返回的 slug；撤销时调用 DELETE .../public-links/{slug}。底层桶始终 Private。
-6. 不要在应用中设置一个平台统一签名时长。每次签名都由当前业务场景选择；有效值为 1–604800 秒。
+6. 不要在应用中设置一个平台统一签名时长。每次签名都由当前业务场景选择；必须是正整数；S3 SigV4 的协议上限为 604800 秒。
 7. 对网络失败实现有限重试。不要在 PUT 成功、commit 状态未知时盲目申请另一上传；先按文档处理状态，避免预留空间和重复对象。
 
 六、完成验证
 使用不含隐私的小文件验证：
 1. ListObjectsV2 能列出虚拟桶。
-2. 申请上传签名时返回 URL 的主机不是 Rosemary 网关。
-3. PUT 文件到真实 S3 URL 后 commit 成功。
+2. 检查响应 direct；为 true 时 URL 主机不是 Rosemary，为 false 时确认平台配置的是 WebDAV 中转。
+3. PUT 到响应 URL 后 commit 成功，并记录 direct 的布尔值。
 4. HEAD 显示正确大小和类型。
-5. 申请 60 秒下载签名，读取内容并确认最终响应主机是真实 S3。
+5. 申请 60 秒下载能力并读取内容；direct=true 时确认最终主机是 S3/CDN，direct=false 时确认是预期的 WebDAV 中转。
 6. 若应用拥有 delete 权限，删除测试对象并确认列表中消失。
 7. 确认日志、错误追踪、测试输出和 Git diff 中没有 Token、AK/SK 或签名 URL。
 
 七、最终只报告
 - 修改了哪些文件，以及采用了哪个存储适配层。
 - 虚拟桶名、权限集合、Secret 的保存位置（只报路径，不报内容）。
-- 上传数据是否直达真实 S3、下载是否重定向成功、各项验证结果。
+- 上传和下载响应的 direct 值、S3/CDN 直达或 WebDAV 中转结果，以及各项验证结果。
 - 尚未解决的问题。绝不回显凭据、Bootstrap Token 或签名 URL。`}

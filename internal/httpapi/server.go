@@ -30,11 +30,18 @@ func (s *Server) Handler() http.Handler { return securityHeaders(s.log(s.mux)) }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		write(w, 200, map[string]any{"status": "ok", "backend_ready": s.svc.S3.Ready()})
+		write(w, 200, map[string]any{"status": "ok", "backend_ready": s.svc.Storage.Ready()})
 	})
 	s.mux.HandleFunc("GET /api/v1/meta", func(w http.ResponseWriter, r *http.Request) {
 		write(w, 200, map[string]any{"gateway_url": s.svc.Config.PublicURL, "project_url": s.svc.Config.ProjectURL, "release_url": s.svc.Config.ReleaseURL, "docs_url": s.svc.Config.PublicURL + "/docs/integration.md"})
 	})
+	s.mux.HandleFunc("GET /api/v1/session", s.session)
+	s.mux.HandleFunc("GET /auth/login", s.oidcLogin)
+	s.mux.HandleFunc("GET /auth/callback", s.oidcCallback)
+	s.mux.HandleFunc("POST /auth/logout", s.logout)
+	s.mux.HandleFunc("GET /api/v1/setup/status", s.admin(s.setupStatus))
+	s.mux.HandleFunc("GET /api/v1/storage-sources", s.admin(s.storageSources))
+	s.mux.HandleFunc("POST /api/v1/storage-sources", s.admin(s.addStorageSource))
 	s.mux.HandleFunc("GET /api/v1/overview", s.admin(s.overview))
 	s.mux.HandleFunc("GET /api/v1/buckets", s.admin(s.buckets))
 	s.mux.HandleFunc("GET /api/v1/access-keys", s.admin(s.keys))
@@ -54,6 +61,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/v1/buckets/{bucket}/public-links/{slug}", s.virtual("manage", s.revokePublicLink))
 	s.mux.HandleFunc("DELETE /api/v1/buckets/{bucket}/objects/{key...}", s.virtual("delete", s.deleteObject))
 	s.mux.HandleFunc("GET /p/{slug}", s.publicRedirect)
+	s.mux.HandleFunc("PUT /transfer/upload/{token}", s.transferUpload)
+	s.mux.HandleFunc("GET /transfer/download/{token}", s.transferDownload)
 	s.mux.HandleFunc("GET /downloads/rvsctl/{os}/{arch}", s.downloadCLI)
 	s.mux.HandleFunc("GET /downloads/rvsctl/SHA256SUMS", s.downloadChecksums)
 	s.mux.Handle("GET /docs/", http.StripPrefix("/docs/", http.FileServer(http.Dir(s.svc.Config.DocsDir))))
@@ -107,6 +116,10 @@ func (s *Server) downloadCLI(w http.ResponseWriter, r *http.Request) {
 func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+s.svc.Config.AdminToken {
+			if _, ok := s.sessionEmail(r); ok {
+				next(w, r)
+				return
+			}
 			fail(w, 401, "admin authentication required")
 			return
 		}
@@ -150,7 +163,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v["total_quota"] = s.svc.Config.TotalQuota
-	v["backend_ready"] = s.svc.S3.Ready()
+	v["backend_ready"] = s.svc.Storage.Ready()
 	write(w, 200, v)
 }
 func (s *Server) buckets(w http.ResponseWriter, r *http.Request) {
@@ -257,7 +270,8 @@ func (s *Server) adminDownload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, e.Error())
 		return
 	}
-	write(w, 200, map[string]any{"url": u, "expires_in": in.ExpiresIn, "direct": true})
+	o, _ := s.svc.DB.GetObject(r.Context(), c.Bucket.ID, in.Key)
+	write(w, 200, map[string]any{"url": u, "expires_in": in.ExpiresIn, "direct": s.svc.Storage.Direct(o.SourceID)})
 }
 func (s *Server) adminInvalidateLinks(w http.ResponseWriter, r *http.Request) {
 	c, e := s.adminCredential(r)
@@ -342,7 +356,7 @@ func (s *Server) beginUpload(w http.ResponseWriter, r *http.Request, c service.C
 		fail(w, 400, e.Error())
 		return
 	}
-	write(w, 201, map[string]any{"upload_id": o.ID, "method": "PUT", "url": u, "expires_in": in.ExpiresIn, "expected_size": in.Size, "required_headers": map[string]string{"Content-Type": in.ContentType}, "commit_url": fmt.Sprintf("%s/api/v1/buckets/%s/objects/commit", s.svc.Config.PublicURL, c.Bucket.Slug)})
+	write(w, 201, map[string]any{"upload_id": o.ID, "method": "PUT", "url": u, "expires_in": in.ExpiresIn, "expected_size": in.Size, "direct": s.svc.Storage.Direct(o.SourceID), "required_headers": map[string]string{"Content-Type": in.ContentType}, "commit_url": fmt.Sprintf("%s/api/v1/buckets/%s/objects/commit", s.svc.Config.PublicURL, c.Bucket.Slug)})
 }
 func (s *Server) commit(w http.ResponseWriter, r *http.Request, c service.Credential) {
 	var in struct {
@@ -375,7 +389,8 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request, c service.Cred
 		fail(w, 400, e.Error())
 		return
 	}
-	write(w, 200, map[string]any{"url": u, "expires_in": in.ExpiresIn, "direct": true})
+	o, _ := s.svc.DB.GetObject(r.Context(), c.Bucket.ID, in.Key)
+	write(w, 200, map[string]any{"url": u, "expires_in": in.ExpiresIn, "direct": s.svc.Storage.Direct(o.SourceID)})
 }
 func (s *Server) publicLink(w http.ResponseWriter, r *http.Request, c service.Credential) {
 	var in struct {
@@ -392,7 +407,8 @@ func (s *Server) publicLink(w http.ResponseWriter, r *http.Request, c service.Cr
 		fail(w, 400, e.Error())
 		return
 	}
-	write(w, 201, map[string]any{"slug": slug, "public_url": stable, "direct_url": direct, "sign_expires_in": in.SignExpiresIn, "link_expires_in": in.LinkExpiresIn})
+	o, _ := s.svc.DB.GetObject(r.Context(), c.Bucket.ID, in.Key)
+	write(w, 201, map[string]any{"slug": slug, "public_url": stable, "direct_url": direct, "direct": s.svc.Storage.Direct(o.SourceID), "sign_expires_in": in.SignExpiresIn, "link_expires_in": in.LinkExpiresIn})
 }
 func (s *Server) revokePublicLink(w http.ResponseWriter, r *http.Request, c service.Credential) {
 	if e := s.svc.RevokePublicLink(r.Context(), c, r.PathValue("slug")); e != nil {
@@ -441,11 +457,19 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/transfer/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
 		if o := r.Header.Get("Origin"); o != "" {
 			w.Header().Set("Access-Control-Allow-Origin", o)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization,Content-Type,X-RVS-Access-Key,X-RVS-Secret-Key")
-			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
 		}
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(204)

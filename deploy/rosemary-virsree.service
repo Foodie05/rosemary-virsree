@@ -1,0 +1,23 @@
+[Unit]
+Description=Rosemary VirSree storage gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rosemary
+Group=rosemary
+EnvironmentFile=/etc/rosemary-virsree.env
+WorkingDirectory=/var/lib/rosemary-virsree
+ExecStart=/opt/rosemary-virsree/current/rosemary-virsree
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/rosemary-virsree
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

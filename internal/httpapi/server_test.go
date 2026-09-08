@@ -2,9 +2,11 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
 
@@ -27,8 +29,84 @@ func testServer(t *testing.T) http.Handler {
 		t.Fatal(err)
 	}
 	cfg := config.Config{AdminToken: "admin", MasterKey: "test-master-key", PublicURL: "https://gateway.test", WebDir: filepath.Join(t.TempDir(), "missing"), TotalQuota: 1000, Backend: config.Backend{Region: "us-east-1"}}
-	svc := service.New(db, provider.New(cfg.Backend), box, cfg)
+	svc, err := service.New(db, provider.New(cfg.Backend), box, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return New(svc).Handler()
+}
+
+func TestOIDCLoginCreatesAllowlistedSessionAndStartsOOBE(t *testing.T) {
+	var nonce string
+	issuer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oidc/token":
+			var body map[string]string
+			if r.Header.Get("Content-Type") != "application/json" || json.NewDecoder(r.Body).Decode(&body) != nil || body["code_verifier"] == "" {
+				t.Error("token request did not use JSON with PKCE verifier")
+			}
+			claims, _ := json.Marshal(map[string]string{"nonce": nonce})
+			idToken := "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".signature"
+			write(w, 200, map[string]string{"access_token": "access", "id_token": idToken})
+		case "/oidc/userinfo":
+			if r.Header.Get("Authorization") != "Bearer access" {
+				t.Error("missing userinfo bearer token")
+			}
+			write(w, 200, map[string]any{"sub": "user-1", "email": "Admin@Example.com", "email_verified": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer issuer.Close()
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "oidc.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	box, _ := secretbox.New("test-master-key")
+	cfg := config.Config{AdminToken: "admin", MasterKey: "test-master-key", PublicURL: "https://storage.example", WebDir: filepath.Join(t.TempDir(), "missing"), TotalQuota: 1000, MaxObjectsPerBucket: 10, MaxPendingUploads: 10, OIDCIssuer: issuer.URL, OIDCClientID: "client", OIDCClientSecret: "secret", OIDCRedirectURL: "https://storage.example/auth/callback", AdminEmails: []string{"admin@example.com"}, SessionTTL: 3600, Backend: config.Backend{Region: "us-east-1"}}
+	svc, err := service.New(db, provider.New(cfg.Backend), box, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(svc).Handler()
+
+	loginReq := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	loginW := httptest.NewRecorder()
+	h.ServeHTTP(loginW, loginReq)
+	if loginW.Code != http.StatusFound {
+		t.Fatalf("login status = %d", loginW.Code)
+	}
+	location, err := url.Parse(loginW.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce = location.Query().Get("nonce")
+	state := location.Query().Get("state")
+	if nonce == "" || state == "" || location.Query().Get("code_challenge_method") != "S256" {
+		t.Fatalf("incomplete authorize URL: %s", location)
+	}
+
+	callbackReq := httptest.NewRequest(http.MethodGet, "/auth/callback?code=ok&state="+url.QueryEscape(state), nil)
+	callbackW := httptest.NewRecorder()
+	h.ServeHTTP(callbackW, callbackReq)
+	if callbackW.Code != http.StatusFound {
+		t.Fatalf("callback status = %d: %s", callbackW.Code, callbackW.Body.String())
+	}
+	cookies := callbackW.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteLaxMode {
+		t.Fatalf("unsafe session cookie: %#v", cookies)
+	}
+
+	sessionReq := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
+	sessionReq.AddCookie(cookies[0])
+	sessionW := httptest.NewRecorder()
+	h.ServeHTTP(sessionW, sessionReq)
+	got := decodeMap(t, sessionW)
+	if got["authenticated"] != true || got["email"] != "admin@example.com" || got["setup_required"] != true {
+		t.Fatalf("unexpected session: %#v", got)
+	}
 }
 
 func request(t *testing.T, h http.Handler, method, path, token string, body any) *httptest.ResponseRecorder {

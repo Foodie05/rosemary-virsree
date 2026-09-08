@@ -38,16 +38,39 @@ func (s *Store) migrate() error {
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS buckets(id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT NOT NULL UNIQUE,visibility TEXT NOT NULL DEFAULT 'private',quota_bytes INTEGER NOT NULL,used_bytes INTEGER NOT NULL DEFAULT 0,reserved_bytes INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL);
 CREATE TABLE IF NOT EXISTS access_keys(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,name TEXT NOT NULL,ak TEXT NOT NULL UNIQUE,secret_cipher TEXT NOT NULL,permissions TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL,last_used_at DATETIME,FOREIGN KEY(bucket_id) REFERENCES buckets(id));
-CREATE TABLE IF NOT EXISTS objects(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,logical_key TEXT NOT NULL,physical_key TEXT NOT NULL UNIQUE,size INTEGER NOT NULL,content_type TEXT,etag TEXT,status TEXT NOT NULL,generation INTEGER NOT NULL DEFAULT 1,is_public INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL,updated_at DATETIME NOT NULL,UNIQUE(bucket_id,logical_key),FOREIGN KEY(bucket_id) REFERENCES buckets(id));
-CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,logical_key TEXT NOT NULL,physical_key TEXT NOT NULL UNIQUE,size INTEGER NOT NULL,content_type TEXT,reserved_bytes INTEGER NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL,UNIQUE(bucket_id,logical_key),FOREIGN KEY(bucket_id) REFERENCES buckets(id));
+CREATE TABLE IF NOT EXISTS storage_sources(id TEXT PRIMARY KEY,name TEXT NOT NULL,kind TEXT NOT NULL,priority INTEGER NOT NULL,capacity_bytes INTEGER NOT NULL,used_bytes INTEGER NOT NULL DEFAULT 0,reserved_bytes INTEGER NOT NULL DEFAULT 0,enabled INTEGER NOT NULL DEFAULT 1,direct_transfer INTEGER NOT NULL DEFAULT 1,cdn_enabled INTEGER NOT NULL DEFAULT 0,config_cipher TEXT NOT NULL,created_at DATETIME NOT NULL);
+CREATE TABLE IF NOT EXISTS objects(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,source_id TEXT NOT NULL DEFAULT '',logical_key TEXT NOT NULL,physical_key TEXT NOT NULL UNIQUE,size INTEGER NOT NULL,content_type TEXT,etag TEXT,status TEXT NOT NULL,generation INTEGER NOT NULL DEFAULT 1,is_public INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL,updated_at DATETIME NOT NULL,UNIQUE(bucket_id,logical_key),FOREIGN KEY(bucket_id) REFERENCES buckets(id));
+CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,source_id TEXT NOT NULL DEFAULT '',logical_key TEXT NOT NULL,physical_key TEXT NOT NULL UNIQUE,size INTEGER NOT NULL,content_type TEXT,reserved_bytes INTEGER NOT NULL,source_reserved_bytes INTEGER NOT NULL DEFAULT 0,transfer_hash TEXT NOT NULL DEFAULT '',expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL,UNIQUE(bucket_id,logical_key),FOREIGN KEY(bucket_id) REFERENCES buckets(id));
 CREATE TABLE IF NOT EXISTS bootstrap_tokens(id TEXT PRIMARY KEY,name TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,max_quota INTEGER NOT NULL,expires_at DATETIME NOT NULL,used_at DATETIME,created_at DATETIME NOT NULL);
 CREATE TABLE IF NOT EXISTS public_links(id TEXT PRIMARY KEY,object_id TEXT NOT NULL,slug TEXT NOT NULL UNIQUE,sign_ttl_seconds INTEGER NOT NULL,expires_at DATETIME,revoked INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL,FOREIGN KEY(object_id) REFERENCES objects(id));
 CREATE TABLE IF NOT EXISTS audits(id INTEGER PRIMARY KEY AUTOINCREMENT,action TEXT NOT NULL,subject TEXT NOT NULL,detail TEXT NOT NULL,created_at DATETIME NOT NULL);
+CREATE TABLE IF NOT EXISTS oidc_challenges(state_hash TEXT PRIMARY KEY,nonce TEXT NOT NULL,verifier TEXT NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL);
+CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY,email TEXT NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL);
+CREATE TABLE IF NOT EXISTS transfer_tokens(token_hash TEXT PRIMARY KEY,object_id TEXT NOT NULL,source_id TEXT NOT NULL DEFAULT '',physical_key TEXT NOT NULL DEFAULT '',size INTEGER NOT NULL DEFAULT 0,content_type TEXT NOT NULL DEFAULT '',etag TEXT NOT NULL DEFAULT '',mode TEXT NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL,FOREIGN KEY(object_id) REFERENCES objects(id));
 CREATE INDEX IF NOT EXISTS objects_bucket ON objects(bucket_id,status);
 CREATE INDEX IF NOT EXISTS uploads_expiry ON uploads(expires_at);
 CREATE INDEX IF NOT EXISTS links_slug ON public_links(slug,revoked);
+CREATE INDEX IF NOT EXISTS sources_priority ON storage_sources(enabled,priority);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	for _, q := range []string{
+		"ALTER TABLE objects ADD COLUMN source_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE uploads ADD COLUMN source_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE uploads ADD COLUMN transfer_hash TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE uploads ADD COLUMN source_reserved_bytes INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE transfer_tokens ADD COLUMN source_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE transfer_tokens ADD COLUMN physical_key TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE transfer_tokens ADD COLUMN size INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE transfer_tokens ADD COLUMN content_type TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE transfer_tokens ADD COLUMN etag TEXT NOT NULL DEFAULT ''",
+	} {
+		if _, e := s.db.Exec(q); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
+			return e
+		}
+	}
+	return nil
 }
 
 func (s *Store) Audit(ctx context.Context, action, subject, detail string) {
@@ -182,27 +205,6 @@ func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt tim
 		return e
 	}
 	defer tx.Rollback()
-	// Release reservations abandoned after their signed upload URL expired.
-	rows, e := tx.QueryContext(ctx, "SELECT bucket_id,COALESCE(sum(reserved_bytes),0) FROM uploads WHERE expires_at<? GROUP BY bucket_id", time.Now().UTC())
-	if e != nil {
-		return e
-	}
-	for rows.Next() {
-		var bucketID string
-		var released int64
-		if e = rows.Scan(&bucketID, &released); e != nil {
-			rows.Close()
-			return e
-		}
-		if _, e = tx.ExecContext(ctx, "UPDATE buckets SET reserved_bytes=MAX(0,reserved_bytes-?) WHERE id=?", released, bucketID); e != nil {
-			rows.Close()
-			return e
-		}
-	}
-	rows.Close()
-	if _, e = tx.ExecContext(ctx, "DELETE FROM uploads WHERE expires_at<?", time.Now().UTC()); e != nil {
-		return e
-	}
 	var pending int64
 	if e = tx.QueryRowContext(ctx, "SELECT count(*) FROM uploads WHERE bucket_id=?", o.BucketID).Scan(&pending); e != nil {
 		return e
@@ -228,7 +230,8 @@ func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt tim
 	if e = tx.QueryRowContext(ctx, "SELECT quota_bytes,used_bytes,reserved_bytes FROM buckets WHERE id=?", o.BucketID).Scan(&q, &u, &r); e != nil {
 		return e
 	}
-	_ = tx.QueryRowContext(ctx, "SELECT size FROM objects WHERE bucket_id=? AND logical_key=? AND status='ready'", o.BucketID, o.LogicalKey).Scan(&oldSize)
+	var oldSource string
+	_ = tx.QueryRowContext(ctx, "SELECT size,source_id FROM objects WHERE bucket_id=? AND logical_key=? AND status='ready'", o.BucketID, o.LogicalKey).Scan(&oldSize, &oldSource)
 	reserved := o.Size - oldSize
 	if reserved < 0 {
 		reserved = 0
@@ -236,7 +239,20 @@ func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt tim
 	if u+r+reserved > q {
 		return errors.New("bucket quota exceeded")
 	}
-	_, e = tx.ExecContext(ctx, `INSERT INTO uploads(id,bucket_id,logical_key,physical_key,size,content_type,reserved_bytes,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, o.ID, o.BucketID, o.LogicalKey, o.PhysicalKey, o.Size, o.ContentType, reserved, expiresAt, o.CreatedAt)
+	sourceReserved := o.Size
+	if oldSource == o.SourceID {
+		sourceReserved = reserved
+	}
+	if o.SourceID != "" {
+		var cap, used, sr int64
+		if e = tx.QueryRowContext(ctx, "SELECT capacity_bytes,used_bytes,reserved_bytes FROM storage_sources WHERE id=? AND enabled=1", o.SourceID).Scan(&cap, &used, &sr); e != nil {
+			return e
+		}
+		if used+sr+sourceReserved > cap {
+			return errors.New("storage source capacity exceeded")
+		}
+	}
+	_, e = tx.ExecContext(ctx, `INSERT INTO uploads(id,bucket_id,source_id,logical_key,physical_key,size,content_type,reserved_bytes,source_reserved_bytes,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, o.ID, o.BucketID, o.SourceID, o.LogicalKey, o.PhysicalKey, o.Size, o.ContentType, reserved, sourceReserved, expiresAt, o.CreatedAt)
 	if e != nil {
 		return e
 	}
@@ -244,12 +260,34 @@ func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt tim
 	if e != nil {
 		return e
 	}
+	if o.SourceID != "" {
+		if _, e = tx.ExecContext(ctx, "UPDATE storage_sources SET reserved_bytes=reserved_bytes+? WHERE id=?", sourceReserved, o.SourceID); e != nil {
+			return e
+		}
+	}
 	return tx.Commit()
+}
+
+func (s *Store) ExpiredUploads(ctx context.Context, limit int) ([]model.Object, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,bucket_id,source_id,logical_key,physical_key,size,content_type,created_at FROM uploads WHERE expires_at<? ORDER BY expires_at LIMIT ?`, time.Now().UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Object
+	for rows.Next() {
+		var o model.Object
+		if err = rows.Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) GetUpload(ctx context.Context, bucketID, id, key string) (model.Object, error) {
 	var o model.Object
-	e := s.db.QueryRowContext(ctx, `SELECT id,bucket_id,logical_key,physical_key,size,content_type,created_at FROM uploads WHERE bucket_id=? AND id=? AND logical_key=?`, bucketID, id, key).Scan(&o.ID, &o.BucketID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.CreatedAt)
+	e := s.db.QueryRowContext(ctx, `SELECT id,bucket_id,source_id,logical_key,physical_key,size,content_type,created_at FROM uploads WHERE bucket_id=? AND id=? AND logical_key=?`, bucketID, id, key).Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.CreatedAt)
 	o.Status = "pending"
 	return o, e
 }
@@ -260,9 +298,9 @@ func (s *Store) CancelUpload(ctx context.Context, id string) error {
 		return e
 	}
 	defer tx.Rollback()
-	var bucketID string
-	var reserved int64
-	if e = tx.QueryRowContext(ctx, "SELECT bucket_id,reserved_bytes FROM uploads WHERE id=?", id).Scan(&bucketID, &reserved); e != nil {
+	var bucketID, sourceID string
+	var reserved, sourceReserved int64
+	if e = tx.QueryRowContext(ctx, "SELECT bucket_id,source_id,reserved_bytes,source_reserved_bytes FROM uploads WHERE id=?", id).Scan(&bucketID, &sourceID, &reserved, &sourceReserved); e != nil {
 		return e
 	}
 	if _, e = tx.ExecContext(ctx, "DELETE FROM uploads WHERE id=?", id); e != nil {
@@ -271,27 +309,32 @@ func (s *Store) CancelUpload(ctx context.Context, id string) error {
 	if _, e = tx.ExecContext(ctx, "UPDATE buckets SET reserved_bytes=MAX(0,reserved_bytes-?) WHERE id=?", reserved, bucketID); e != nil {
 		return e
 	}
+	if sourceID != "" {
+		if _, e = tx.ExecContext(ctx, "UPDATE storage_sources SET reserved_bytes=MAX(0,reserved_bytes-?) WHERE id=?", sourceReserved, sourceID); e != nil {
+			return e
+		}
+	}
 	return tx.Commit()
 }
 func (s *Store) GetObject(ctx context.Context, bucketID, key string) (model.Object, error) {
 	var o model.Object
-	e := s.db.QueryRowContext(ctx, "SELECT id,bucket_id,logical_key,physical_key,size,content_type,etag,status,generation,is_public,created_at,updated_at FROM objects WHERE bucket_id=? AND logical_key=?", bucketID, key).Scan(&o.ID, &o.BucketID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt)
+	e := s.db.QueryRowContext(ctx, "SELECT id,bucket_id,source_id,logical_key,physical_key,size,content_type,etag,status,generation,is_public,created_at,updated_at FROM objects WHERE bucket_id=? AND logical_key=?", bucketID, key).Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt)
 	return o, e
 }
-func (s *Store) CommitUpload(ctx context.Context, upload model.Object, etag string, actual int64) (model.Object, string, error) {
+func (s *Store) CommitUpload(ctx context.Context, upload model.Object, etag string, actual int64) (model.Object, string, string, error) {
 	tx, e := s.db.BeginTx(ctx, nil)
 	if e != nil {
-		return model.Object{}, "", e
+		return model.Object{}, "", "", e
 	}
 	defer tx.Rollback()
-	var reserved int64
-	if e = tx.QueryRowContext(ctx, "SELECT reserved_bytes FROM uploads WHERE id=?", upload.ID).Scan(&reserved); e != nil {
-		return model.Object{}, "", e
+	var reserved, sourceReserved int64
+	if e = tx.QueryRowContext(ctx, "SELECT reserved_bytes,source_reserved_bytes FROM uploads WHERE id=?", upload.ID).Scan(&reserved, &sourceReserved); e != nil {
+		return model.Object{}, "", "", e
 	}
 	var old model.Object
-	oldErr := tx.QueryRowContext(ctx, "SELECT id,physical_key,size,generation,created_at FROM objects WHERE bucket_id=? AND logical_key=?", upload.BucketID, upload.LogicalKey).Scan(&old.ID, &old.PhysicalKey, &old.Size, &old.Generation, &old.CreatedAt)
+	oldErr := tx.QueryRowContext(ctx, "SELECT id,source_id,physical_key,size,generation,created_at FROM objects WHERE bucket_id=? AND logical_key=?", upload.BucketID, upload.LogicalKey).Scan(&old.ID, &old.SourceID, &old.PhysicalKey, &old.Size, &old.Generation, &old.CreatedAt)
 	if oldErr != nil && !errors.Is(oldErr, sql.ErrNoRows) {
-		return model.Object{}, "", oldErr
+		return model.Object{}, "", "", oldErr
 	}
 	objectID := old.ID
 	createdAt := old.CreatedAt
@@ -305,22 +348,32 @@ func (s *Store) CommitUpload(ctx context.Context, upload model.Object, etag stri
 	if generation < 1 {
 		generation = 1
 	}
-	_, e = tx.ExecContext(ctx, `INSERT INTO objects(id,bucket_id,logical_key,physical_key,size,content_type,etag,status,generation,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(bucket_id,logical_key) DO UPDATE SET physical_key=excluded.physical_key,size=excluded.size,content_type=excluded.content_type,etag=excluded.etag,status='ready',generation=excluded.generation,updated_at=excluded.updated_at`, objectID, upload.BucketID, upload.LogicalKey, upload.PhysicalKey, actual, upload.ContentType, etag, "ready", generation, createdAt, now)
+	_, e = tx.ExecContext(ctx, `INSERT INTO objects(id,bucket_id,source_id,logical_key,physical_key,size,content_type,etag,status,generation,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(bucket_id,logical_key) DO UPDATE SET source_id=excluded.source_id,physical_key=excluded.physical_key,size=excluded.size,content_type=excluded.content_type,etag=excluded.etag,status='ready',generation=excluded.generation,updated_at=excluded.updated_at`, objectID, upload.BucketID, upload.SourceID, upload.LogicalKey, upload.PhysicalKey, actual, upload.ContentType, etag, "ready", generation, createdAt, now)
 	if e != nil {
-		return model.Object{}, "", e
+		return model.Object{}, "", "", e
 	}
 	_, e = tx.ExecContext(ctx, "UPDATE buckets SET reserved_bytes=MAX(0,reserved_bytes-?),used_bytes=MAX(0,used_bytes-?)+? WHERE id=?", reserved, old.Size, actual, upload.BucketID)
 	if e != nil {
-		return model.Object{}, "", e
+		return model.Object{}, "", "", e
 	}
 	if _, e = tx.ExecContext(ctx, "DELETE FROM uploads WHERE id=?", upload.ID); e != nil {
-		return model.Object{}, "", e
+		return model.Object{}, "", "", e
+	}
+	if upload.SourceID != "" {
+		if _, e = tx.ExecContext(ctx, "UPDATE storage_sources SET reserved_bytes=MAX(0,reserved_bytes-?),used_bytes=used_bytes+? WHERE id=?", sourceReserved, actual, upload.SourceID); e != nil {
+			return model.Object{}, "", "", e
+		}
+	}
+	if old.SourceID != "" {
+		if _, e = tx.ExecContext(ctx, "UPDATE storage_sources SET used_bytes=MAX(0,used_bytes-?) WHERE id=?", old.Size, old.SourceID); e != nil {
+			return model.Object{}, "", "", e
+		}
 	}
 	if e = tx.Commit(); e != nil {
-		return model.Object{}, "", e
+		return model.Object{}, "", "", e
 	}
 	upload.ID, upload.Size, upload.ETag, upload.Status, upload.Generation, upload.CreatedAt, upload.UpdatedAt = objectID, actual, etag, "ready", generation, createdAt, now
-	return upload, oldPhysical, nil
+	return upload, oldPhysical, old.SourceID, nil
 }
 
 func secretID(uploadID string) string { return "obj_" + strings.TrimPrefix(uploadID, "obj_") }
@@ -330,12 +383,15 @@ func (s *Store) DeleteObject(ctx context.Context, id string) error {
 		return e
 	}
 	defer tx.Rollback()
-	var bid, status string
+	var bid, sourceID, status string
 	var size int64
-	if e = tx.QueryRowContext(ctx, "SELECT bucket_id,status,size FROM objects WHERE id=?", id).Scan(&bid, &status, &size); e != nil {
+	if e = tx.QueryRowContext(ctx, "SELECT bucket_id,source_id,status,size FROM objects WHERE id=?", id).Scan(&bid, &sourceID, &status, &size); e != nil {
 		return e
 	}
 	if _, e = tx.ExecContext(ctx, "DELETE FROM public_links WHERE object_id=?", id); e != nil {
+		return e
+	}
+	if _, e = tx.ExecContext(ctx, "DELETE FROM transfer_tokens WHERE object_id=?", id); e != nil {
 		return e
 	}
 	if _, e = tx.ExecContext(ctx, "DELETE FROM objects WHERE id=?", id); e != nil {
@@ -349,10 +405,15 @@ func (s *Store) DeleteObject(ctx context.Context, id string) error {
 	if e != nil {
 		return e
 	}
+	if status == "ready" && sourceID != "" {
+		if _, e = tx.ExecContext(ctx, "UPDATE storage_sources SET used_bytes=MAX(0,used_bytes-?) WHERE id=?", size, sourceID); e != nil {
+			return e
+		}
+	}
 	return tx.Commit()
 }
 func (s *Store) ListObjects(ctx context.Context, bucketID, prefix string) ([]model.Object, error) {
-	rows, e := s.db.QueryContext(ctx, "SELECT id,bucket_id,logical_key,physical_key,size,content_type,etag,status,generation,is_public,created_at,updated_at FROM objects WHERE bucket_id=? AND status='ready' AND logical_key LIKE ? ORDER BY logical_key LIMIT 1000", bucketID, prefix+"%")
+	rows, e := s.db.QueryContext(ctx, "SELECT id,bucket_id,source_id,logical_key,physical_key,size,content_type,etag,status,generation,is_public,created_at,updated_at FROM objects WHERE bucket_id=? AND status='ready' AND logical_key LIKE ? ORDER BY logical_key LIMIT 1000", bucketID, prefix+"%")
 	if e != nil {
 		return nil, e
 	}
@@ -360,7 +421,7 @@ func (s *Store) ListObjects(ctx context.Context, bucketID, prefix string) ([]mod
 	var out []model.Object
 	for rows.Next() {
 		var o model.Object
-		if e = rows.Scan(&o.ID, &o.BucketID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt); e != nil {
+		if e = rows.Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt); e != nil {
 			return nil, e
 		}
 		out = append(out, o)
@@ -389,7 +450,7 @@ func (s *Store) PublicObject(ctx context.Context, slug string) (model.Object, in
 	var o model.Object
 	var ttl int64
 	var expiry sql.NullTime
-	e := s.db.QueryRowContext(ctx, `SELECT o.id,o.bucket_id,o.logical_key,o.physical_key,o.size,o.content_type,o.etag,o.status,o.generation,o.is_public,o.created_at,o.updated_at,l.sign_ttl_seconds,l.expires_at FROM public_links l JOIN objects o ON o.id=l.object_id WHERE l.slug=? AND l.revoked=0`, slug).Scan(&o.ID, &o.BucketID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt, &ttl, &expiry)
+	e := s.db.QueryRowContext(ctx, `SELECT o.id,o.bucket_id,o.source_id,o.logical_key,o.physical_key,o.size,o.content_type,o.etag,o.status,o.generation,o.is_public,o.created_at,o.updated_at,l.sign_ttl_seconds,l.expires_at FROM public_links l JOIN objects o ON o.id=l.object_id WHERE l.slug=? AND l.revoked=0`, slug).Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt, &ttl, &expiry)
 	if e == nil && expiry.Valid && time.Now().After(expiry.Time) {
 		return o, ttl, errors.New("link expired")
 	}

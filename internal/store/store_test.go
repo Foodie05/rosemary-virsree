@@ -25,7 +25,7 @@ func TestReplacementOnlyReservesGrowth(t *testing.T) {
 	if err = db.ReserveObject(ctx, first, time.Now().Add(time.Minute), 100, 10); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = db.CommitUpload(ctx, first, "etag-1", 100); err != nil {
+	if _, _, _, err = db.CommitUpload(ctx, first, "etag-1", 100); err != nil {
 		t.Fatal(err)
 	}
 
@@ -41,7 +41,7 @@ func TestReplacementOnlyReservesGrowth(t *testing.T) {
 		t.Fatalf("used/reserved = %d/%d, want 100/50", buckets[0].UsedBytes, buckets[0].ReservedBytes)
 	}
 
-	ready, oldPhysical, err := db.CommitUpload(ctx, replacement, "etag-2", 150)
+	ready, oldPhysical, _, err := db.CommitUpload(ctx, replacement, "etag-2", 150)
 	if err != nil {
 		t.Fatal(err)
 	}

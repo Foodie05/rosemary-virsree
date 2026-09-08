@@ -78,11 +78,11 @@ rvsctl 会创建虚拟桶，把 AWS_ENDPOINT_URL、AWS_REGION、AWS_ACCESS_KEY_I
 3. 禁止对 Rosemary 的 /s3 调用 PutObject，禁止把上传文件正文发送给 Rosemary。
 4. 上传严格执行三步：
    a. POST {{GATEWAY}}/api/v1/buckets/{bucket}/objects/upload。用 X-RVS-Access-Key 和 X-RVS-Secret-Key 认证，JSON 提交 key、准确 size、content_type 和当前业务选择的 expires_in。
-   b. 只把文件 PUT 到响应中的真实 S3 url，并原样带上 required_headers。不要记录或持久化该 URL。
+   b. 把文件 PUT 到响应中的短期 url，并原样带上 required_headers。S3 来源时它是真实 S3 地址；WebDAV 来源时它是 Rosemary 中转能力地址。不要记录或持久化该 URL。
    c. PUT 成功后 POST 响应中的 commit_url，提交 upload_id 和 key。只有 commit 成功才向业务层报告上传完成。
-5. 下载调用 POST {{GATEWAY}}/api/v1/buckets/{bucket}/objects/download，提交 key、可选 filename 和当前业务选择的 expires_in；响应 url 直接指向真实 S3。
+5. 下载调用 POST {{GATEWAY}}/api/v1/buckets/{bucket}/objects/download，提交 key、可选 filename 和当前业务选择的 expires_in；检查响应 direct：true 表示真实 S3/CDN 直链；false 表示 WebDAV 中转能力地址。
 6. “公开链接”调用 .../objects/public-link 创建，也要明确提交 sign_expires_in，并保存返回的 slug；撤销时调用 DELETE .../public-links/{slug}。底层桶始终 Private。
-7. 每次签名都由当前业务场景选择有效期。平台没有业务默认值；有效范围是 1–604800 秒。
+7. 每次签名都由当前业务场景选择有效期。平台没有业务默认值；必须是正整数，S3 SigV4 的协议上限为 604800 秒。
 8. 对网络错误做有限重试。真实 S3 PUT 成功但 commit 结果未知时，先按 API 文档核实，避免重复对象和预留空间。
 
 六、完成验证
@@ -90,9 +90,9 @@ rvsctl 会创建虚拟桶，把 AWS_ENDPOINT_URL、AWS_REGION、AWS_ACCESS_KEY_I
 1. ListObjectsV2 能列出虚拟桶。
 2. HeadObject 对不存在对象返回正确的不存在语义。
 3. 直接向 {{GATEWAY}}/s3/{bucket}/{key} PUT 返回 405。
-4. 申请上传签名的 url 主机不是 Rosemary 实例。
-5. PUT 到真实 S3 后 commit 成功，HEAD 显示正确大小和类型。
-6. 申请 60 秒下载签名，内容一致，最终响应主机是真实 S3。
+4. 检查响应 direct；为 true 时 url 主机不是 Rosemary，为 false 时确认平台配置的是 WebDAV 中转。
+5. PUT 到响应 URL 后 commit 成功，HEAD 显示正确大小和类型。
+6. 申请 60 秒下载能力且内容一致；按 direct 验证 S3/CDN 直达或 WebDAV 中转。
 7. 若有 delete 权限，删除测试对象并确认列表中消失。
 8. 没有 write 权限的 Key 申请上传必须返回 403。
 9. 日志、错误追踪、测试输出和 Git diff 不含 Token、AK/SK 或签名 URL。
@@ -100,7 +100,7 @@ rvsctl 会创建虚拟桶，把 AWS_ENDPOINT_URL、AWS_REGION、AWS_ACCESS_KEY_I
 七、最终只报告
 - 修改了哪些文件，以及使用哪个存储适配层。
 - 虚拟桶名、权限集合、Secret 保存位置（只报路径，不报内容）。
-- 上传是否直达真实 S3、下载是否重定向成功、各项验证结果。
+- 上传和下载响应的 direct 值、S3/CDN 直达或 WebDAV 中转结果，以及各项验证结果。
 - 尚未解决的问题。
 
 绝不回显凭据、Bootstrap Token 或签名 URL。

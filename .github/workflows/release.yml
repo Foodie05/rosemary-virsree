@@ -16,6 +16,16 @@ jobs:
         with:
           go-version: '1.24.x'
           cache: true
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Build management console
+        run: cd web && pnpm install --frozen-lockfile && pnpm build
       - name: Build server and CLI artifacts
         shell: bash
         run: |
@@ -28,6 +38,22 @@ jobs:
           done
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o release/rosemary-virsree-linux-amd64 ./cmd/server
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o release/rosemary-virsree-linux-arm64 ./cmd/server
+          for arch in amd64 arm64; do
+            bundle="release/bundle-$arch"
+            mkdir -p "$bundle/web" "$bundle/downloads/rvsctl"
+            cp "release/rosemary-virsree-linux-$arch" "$bundle/rosemary-virsree"
+            cp -R web/dist "$bundle/web/dist"
+            cp -R docs "$bundle/docs"
+            for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/arm64 windows/amd64; do
+              os=${target%/*}; cli_arch=${target#*/}; ext=""
+              [[ "$os" == windows ]] && ext=".exe"
+              mkdir -p "$bundle/downloads/rvsctl/$os/$cli_arch"
+              cp "release/rvsctl-$os-$cli_arch$ext" "$bundle/downloads/rvsctl/$os/$cli_arch/rvsctl$ext"
+            done
+            (cd "$bundle/downloads/rvsctl" && find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+            tar -C "$bundle" -czf "release/rosemary-virsree-linux-$arch.tar.gz" .
+            rm -rf "$bundle"
+          done
           cd release && sha256sum * > SHA256SUMS
       - uses: softprops/action-gh-release@v3
         with:

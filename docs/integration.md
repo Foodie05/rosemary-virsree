@@ -1,6 +1,6 @@
 # Rosemary VirSree：从零接入指南
 
-本文面向第一次接触 Rosemary VirSree 的应用开发者。完成后，应用只保存一组虚拟 AK/SK；真实 S3 凭据、真实桶名、对象物理键和配额策略都由 Rosemary 管理。文件正文不会经过 Rosemary。
+本文面向第一次接触 Rosemary VirSree 的应用开发者。完成后，应用只保存一组虚拟 AK/SK；真实存储凭据、物理位置、对象键和配额策略都由 Rosemary 管理。S3 文件直达真实存储或兼容 CDN；WebDAV 因没有通用预签名协议而通过短期能力地址中转。
 
 ## 1. 先分清部署实例和开源网站
 
@@ -32,7 +32,7 @@ export RVS_RELEASES=https://github.com/Foodie05/rosemary-virsree/releases
 |---|---|---|
 | `https://storage.example.com/api/v1` | 创建桶、申请上传/下载签名、commit、公开链接和运维 | 否，只传 JSON |
 | `https://storage.example.com/s3` | ListObjectsV2、HeadObject、GetObject、DeleteObject 的虚拟 S3 入口 | GET 会 307 到真实 S3 |
-| 响应中的真实 S3 `url` | 上传或下载文件 | 是，应用直接连接 S3 |
+| 响应中的短期 `url` | 上传或下载文件 | `direct=true` 直连 S3/CDN；`false` 经 WebDAV 中转 |
 
 Rosemary 的 `/s3` 不接受 `PutObject`。上传前必须先取得真实 S3 预签名 URL。
 
@@ -58,7 +58,7 @@ curl -fsS "$RVS_GATEWAY/health"
 {"status":"ok","backend_ready":true}
 ```
 
-`backend_ready=false` 表示管理面在线，但真实 S3 尚未配置，不能签发或提交对象操作。
+`backend_ready=false` 表示管理面在线，但还没有可用存储源，不能签发或提交对象操作。
 
 ## 5. 从 Release 下载 rvsctl
 
@@ -203,7 +203,7 @@ Content-Type: application/json
 }
 ```
 
-`size` 必须是实际字节数。`expires_in` 由当前业务选择，范围 1–604800 秒。
+`size` 必须是实际字节数。`expires_in` 由当前业务选择且必须为正整数；S3 SigV4 的协议上限是 604800 秒。响应里的 `direct` 明确说明文件是否绕过 Rosemary。
 上传签名会绑定这个 Content-Length。浏览器会依据 `Blob` / `File` 自动发送该请求头；不要尝试在前端 JavaScript 中手工设置受浏览器保护的 `Content-Length`。
 
 响应示例：
@@ -220,7 +220,7 @@ Content-Type: application/json
 }
 ```
 
-### 第二步：把正文发给真实 S3
+### 第二步：把正文发给响应 URL
 
 ```bash
 curl -f -X PUT "$SIGNED_REAL_S3_URL" \
@@ -254,7 +254,7 @@ Content-Type: application/json
 {"key":"invoices/2026/INV-1001.pdf","filename":"invoice.pdf","expires_in":300}
 ```
 
-响应中的 `url` 是真实 S3 URL。后端可以返回给可信客户端，浏览器可以跳转或下载；文件不会经过 Rosemary。
+响应中的 `url` 是短期文件地址。`direct=true` 时指向真实 S3 或兼容 CDN，文件不经过 Rosemary；`direct=false` 时对象位于 WebDAV，地址由 Rosemary 中转。
 
 ## 10. 私有链接与“公开”链接
 

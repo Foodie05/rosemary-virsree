@@ -28,6 +28,7 @@ type AccessKey struct {
 type Object struct {
 	ID          string    `json:"id"`
 	BucketID    string    `json:"bucket_id"`
+	SourceID    string    `json:"source_id"`
 	LogicalKey  string    `json:"key"`
 	PhysicalKey string    `json:"-"`
 	ContentType string    `json:"content_type"`
@@ -38,6 +39,21 @@ type Object struct {
 	Public      bool      `json:"public"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type StorageSource struct {
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Kind          string    `json:"kind"`
+	Priority      int       `json:"priority"`
+	CapacityBytes int64     `json:"capacity_bytes"`
+	UsedBytes     int64     `json:"used_bytes"`
+	ReservedBytes int64     `json:"reserved_bytes"`
+	Enabled       bool      `json:"enabled"`
+	Direct        bool      `json:"direct_transfer"`
+	CDNEnabled    bool      `json:"cdn_enabled"`
+	ConfigCipher  string    `json:"-"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type BootstrapToken struct {

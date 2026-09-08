@@ -14,17 +14,21 @@ func (s *Service) RotateObjectKey(ctx context.Context, c Credential, key string)
 	}
 	generation := time.Now().UnixNano()
 	next := physical(c.Bucket, key, generation)
-	if err = s.S3.Copy(ctx, o.PhysicalKey, next); err != nil {
+	backend, err := s.Storage.backend(o.SourceID)
+	if err != nil {
 		return err
 	}
-	if err = s.S3.Delete(ctx, o.PhysicalKey); err != nil {
+	if err = backend.Copy(ctx, o.PhysicalKey, next); err != nil {
+		return err
+	}
+	if err = backend.Delete(ctx, o.PhysicalKey); err != nil {
 		return err
 	}
 	if err = s.DB.RotatePhysicalKey(ctx, o.ID, next, generation); err != nil {
 		// Restore the old physical key if the metadata switch fails. This keeps
 		// the logical mapping readable even when the database update fails.
-		_ = s.S3.Copy(ctx, next, o.PhysicalKey)
-		_ = s.S3.Delete(ctx, next)
+		_ = backend.Copy(ctx, next, o.PhysicalKey)
+		_ = backend.Delete(ctx, next)
 		return err
 	}
 	s.DB.Audit(ctx, "object.links-invalidated", c.Bucket.Slug, key)

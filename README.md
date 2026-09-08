@@ -4,23 +4,23 @@
 [![Release](https://img.shields.io/github/v/release/Foodie05/rosemary-virsree)](https://github.com/Foodie05/rosemary-virsree/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Rosemary VirSree is a virtual S3 control plane for several applications that share one real, private S3 bucket. Applications receive virtual access keys and isolated bucket names. The platform enforces permissions and quotas, stores the logical-to-physical object map, and signs operations against the real bucket.
+Rosemary VirSree is a virtual S3 control plane for applications that should never receive physical storage credentials. Applications receive virtual access keys and isolated bucket names. Operators can attach multiple private S3 or WebDAV sources; Rosemary enforces permissions and quotas, stores each logical-to-physical mapping, and allocates new objects by source priority and available capacity.
 
 All control traffic enters one gateway:
 
 - `/api/v1` — administration, onboarding, direct-transfer signing, quota and link operations
 - `/s3` — SigV4-authenticated S3-compatible object operations
-- `/p` — stable public aliases that redirect to a freshly signed real S3 URL
+- `/p` — stable public aliases that resolve to a fresh storage capability URL
 
-Upload and download bytes go directly between the application and the real S3 endpoint after signing. The gateway does not proxy object bodies.
+S3 upload and download bytes go directly between the application and the real S3 or compatible CDN endpoint after signing. Generic WebDAV has no presigned URL standard, so WebDAV file bytes use short-lived Rosemary relay capabilities and API responses explicitly report `direct: false`.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
   A[Application\nvirtual AK/SK] -->|control and signing| G[Rosemary VirSree\ncentral gateway]
-  G -->|presign with real credentials| S[(Private S3 bucket)]
-  A -.->|PUT / GET using real presigned URL| S
+  G -->|select by priority and capacity| S[(Private S3 / WebDAV sources)]
+  A -.->|S3: PUT / GET using presigned URL| S
   G --> M[(SQLite metadata\nkeys, quotas, mappings, audit)]
 ```
 
@@ -32,19 +32,19 @@ Requirements: Go 1.24+, Node 22+, and pnpm.
 
 ```bash
 cp .env.example .env
-# Configure one existing private S3 bucket and use long random values for
-# RVS_ADMIN_TOKEN and RVS_MASTER_KEY.
+# Configure OIDC, the administrator email allowlist, and long random values
+# for RVS_ADMIN_TOKEN and RVS_MASTER_KEY. Storage is added in browser OOBE.
 set -a; source .env; set +a
 
 cd web && pnpm install && pnpm build && cd ..
 go run ./cmd/server
 ```
 
-Open `http://127.0.0.1:8080` and enter the `RVS_ADMIN_TOKEN` you configured. `RVS_ADMIN_TOKEN` and `RVS_MASTER_KEY` are required; the server refuses to start without them.
+Open `http://127.0.0.1:8080` and log in through the configured OIDC provider using an allowlisted email. A fresh database starts the guided **Welcome → storage source → console** OOBE. `RVS_ADMIN_TOKEN` remains available for administrative automation; it is not the browser login.
 
 The console provides capacity overview, virtual-bucket creation, object browsing and operations, four independent key permissions, one-click Agent prompts, and configuration guidance. Object downloads opened from the console still go directly to S3 and require the operator to choose the signature duration.
 
-The backing bucket must already exist and remain private. Rosemary does not create it or expose its credentials to applications.
+Every physical bucket or WebDAV collection must already exist and remain private. Rosemary does not expose physical credentials to applications. See [the operator setup guide](docs/operator-setup.md) for OIDC, multi-source allocation, S3-compatible CDN rules and the WebDAV transfer boundary.
 
 The platform identity needs object-level `GetObject`, `PutObject`, and `DeleteObject` access under the `rosemary/` and `rosemary-staging/` prefixes; server-side promotion and link invalidation use the same read/write permissions. Configure an 8-day lifecycle expiration for `rosemary-staging/` so interrupted or reused upload URLs cannot leave temporary objects indefinitely. Browser applications also need the backing bucket's CORS policy to allow their origins, `GET`, `HEAD`, `PUT`, and the headers they send, because signed object traffic bypasses the gateway.
 
@@ -110,7 +110,7 @@ An arbitrary S3 SDK cannot provide fully transparent, zero-proxy uploads through
 
 Every deployment has its own gateway URL. Set `RVS_PUBLIC_URL` to the externally reachable HTTPS origin and keep `RVS_PROJECT_URL` / `RVS_RELEASE_URL` pointed at the source and CLI release location you trust. The public GitHub URL is never an application S3 endpoint.
 
-For a single-node deployment, copy the example configuration, replace every placeholder secret and S3 value, then build locally:
+For a single-node deployment, copy the example configuration, replace every placeholder secret and OIDC value, then build locally. Add physical storage through OOBE:
 
 ```bash
 cp .env.example .env
@@ -120,6 +120,14 @@ docker compose up -d --build
 curl -fsS https://storage.example.com/health
 curl -fsS https://storage.example.com/api/v1/meta
 ```
+
+For the provided `storage.cruty.cn` deployment, first register the exact OIDC callback `https://storage.cruty.cn/auth/callback`, then run the local interactive uploader. It asks for the client ID, client secret and administrator email, preserves or generates the remaining secrets without printing them, installs the environment file over SSH, and restarts only Rosemary:
+
+```bash
+./deploy/configure-production.sh
+```
+
+After the first OIDC login, the browser OOBE verifies and saves the initial S3 or WebDAV source. See [docs/operator-setup.md](docs/operator-setup.md) before adding a CDN endpoint.
 
 Terminate TLS in a reverse proxy or load balancer. Persist both the `rosemary-data` volume and `RVS_MASTER_KEY`; losing either breaks access to existing virtual credentials. The full operator and application walkthrough is in [docs/integration.md](docs/integration.md).
 

@@ -34,7 +34,11 @@ func main() {
 		slog.Error("secret encryption failed", "error", err)
 		os.Exit(1)
 	}
-	svc := service.New(db, provider.New(cfg.Backend), box, cfg)
+	svc, err := service.New(db, provider.New(cfg.Backend), box, cfg)
+	if err != nil {
+		slog.Error("storage sources failed", "error", err)
+		os.Exit(1)
+	}
 	server := &http.Server{Addr: cfg.Listen, Handler: httpapi.New(svc).Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
 	go func() {
 		slog.Info("Rosemary VirSree gateway ready", "listen", cfg.Listen, "public_url", cfg.PublicURL, "backend_ready", cfg.BackendReady())

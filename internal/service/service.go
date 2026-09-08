@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"time"
@@ -20,10 +21,10 @@ import (
 var slugRx = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
 
 type Service struct {
-	DB     *store.Store
-	S3     *provider.S3
-	Box    *secretbox.Box
-	Config config.Config
+	DB      *store.Store
+	Storage *StorageManager
+	Box     *secretbox.Box
+	Config  config.Config
 }
 type Credential struct {
 	AccessKey, SecretKey string `json:"-"`
@@ -31,8 +32,12 @@ type Credential struct {
 	Key                  model.AccessKey
 }
 
-func New(db *store.Store, p *provider.S3, b *secretbox.Box, c config.Config) *Service {
-	return &Service{DB: db, S3: p, Box: b, Config: c}
+func New(db *store.Store, p *provider.S3, b *secretbox.Box, c config.Config) (*Service, error) {
+	m := NewStorageManager(db, b, c.PublicURL, p)
+	if err := m.Load(context.Background()); err != nil {
+		return nil, fmt.Errorf("load storage sources: %w", err)
+	}
+	return &Service{DB: db, Storage: m, Box: b, Config: c}, nil
 }
 func (s *Service) NewBucket(ctx context.Context, name, slug, visibility string, quota int64) (model.Bucket, error) {
 	slug = strings.ToLower(strings.TrimSpace(slug))
@@ -166,13 +171,33 @@ func (s *Service) BeginUpload(ctx context.Context, c Credential, key, contentTyp
 	if expires < 1 {
 		return model.Object{}, "", errors.New("expires_in is required")
 	}
+	s.cleanupExpiredUploads(ctx)
 	gen := time.Now().UnixNano()
 	o := model.Object{ID: secretbox.Random("obj_", 12), BucketID: c.Bucket.ID, LogicalKey: key, Size: size, ContentType: contentType, Generation: gen, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	o.PhysicalKey = stagingPhysical(c.Bucket, o.ID, o.LogicalKey)
-	if e := s.DB.ReserveObject(ctx, o, time.Now().Add(time.Duration(expires)*time.Second), s.Config.MaxObjectsPerBucket, s.Config.MaxPendingUploads); e != nil {
-		return o, "", e
+	var b provider.Backend
+	var e error
+	for _, candidate := range s.Storage.candidates() {
+		o.SourceID = candidate.meta.ID
+		o.PhysicalKey = stagingPhysical(c.Bucket, o.ID, o.LogicalKey)
+		if e = s.DB.ReserveObject(ctx, o, time.Now().Add(time.Duration(expires)*time.Second), s.Config.MaxObjectsPerBucket, s.Config.MaxPendingUploads); e == nil {
+			b = candidate.backend
+			break
+		}
+		if !strings.Contains(e.Error(), "storage source capacity") {
+			return o, "", e
+		}
 	}
-	u, e := s.S3.PresignPut(ctx, o.PhysicalKey, contentType, size, time.Duration(expires)*time.Second)
+	if b == nil {
+		return o, "", errors.New("no storage source has enough capacity")
+	}
+	var u string
+	if b.Kind() == "s3" {
+		u, e = b.PresignPut(ctx, o.PhysicalKey, contentType, size, time.Duration(expires)*time.Second)
+	} else {
+		token := secretbox.Random("rvs_up_", 24)
+		e = s.DB.SetUploadTransferHash(ctx, o.ID, secretbox.Hash(token))
+		u = s.Config.PublicURL + "/transfer/upload/" + token
+	}
 	if e != nil {
 		_ = s.DB.CancelUpload(ctx, o.ID)
 		return o, "", e
@@ -180,12 +205,33 @@ func (s *Service) BeginUpload(ctx context.Context, c Credential, key, contentTyp
 	s.DB.Audit(ctx, "upload.signed", c.Bucket.Slug, o.LogicalKey)
 	return o, u, nil
 }
+
+func (s *Service) cleanupExpiredUploads(ctx context.Context) {
+	uploads, err := s.DB.ExpiredUploads(ctx, 100)
+	if err != nil {
+		return
+	}
+	for _, upload := range uploads {
+		backend, err := s.Storage.backend(upload.SourceID)
+		if err != nil {
+			continue
+		}
+		if err = backend.Delete(ctx, upload.PhysicalKey); err != nil {
+			continue
+		}
+		_ = s.DB.CancelUpload(ctx, upload.ID)
+	}
+}
 func (s *Service) CommitUpload(ctx context.Context, c Credential, id, key string) (model.Object, error) {
 	o, e := s.DB.GetUpload(ctx, c.Bucket.ID, id, key)
 	if e != nil {
 		return o, e
 	}
-	h, e := s.S3.Head(ctx, o.PhysicalKey)
+	b, e := s.Storage.backend(o.SourceID)
+	if e != nil {
+		return o, e
+	}
+	h, e := b.Head(ctx, o.PhysicalKey)
 	if e != nil {
 		return o, e
 	}
@@ -199,25 +245,28 @@ func (s *Service) CommitUpload(ctx context.Context, c Credential, id, key string
 	}
 	finalPhysical := physical(c.Bucket, o.LogicalKey, finalGeneration)
 	o.PhysicalKey = finalPhysical
-	if e = s.S3.Copy(ctx, stagingPhysical, finalPhysical); e != nil {
+	if e = b.Copy(ctx, stagingPhysical, finalPhysical); e != nil {
 		return o, fmt.Errorf("promote staged upload: %w", e)
 	}
-	finalHead, e := s.S3.Head(ctx, finalPhysical)
+	finalHead, e := b.Head(ctx, finalPhysical)
 	if e != nil || finalHead.Size != h.Size {
-		_ = s.S3.Delete(ctx, finalPhysical)
+		_ = b.Delete(ctx, finalPhysical)
 		if e != nil {
 			return o, fmt.Errorf("verify promoted upload: %w", e)
 		}
 		return o, errors.New("promoted upload size mismatch")
 	}
-	o, oldPhysical, e := s.DB.CommitUpload(ctx, o, finalHead.ETag, finalHead.Size)
+	o, oldPhysical, oldSourceID, e := s.DB.CommitUpload(ctx, o, finalHead.ETag, finalHead.Size)
 	if e != nil {
-		_ = s.S3.Delete(ctx, finalPhysical)
+		_ = b.Delete(ctx, finalPhysical)
 		return o, e
 	}
-	_ = s.S3.Delete(ctx, stagingPhysical)
+	_ = b.Delete(ctx, stagingPhysical)
 	if oldPhysical != "" && oldPhysical != o.PhysicalKey {
-		_ = s.S3.Delete(ctx, oldPhysical)
+		oldBackend, _ := s.Storage.backend(oldSourceID)
+		if oldBackend != nil {
+			_ = oldBackend.Delete(ctx, oldPhysical)
+		}
 	}
 	s.DB.Audit(ctx, "upload.committed", c.Bucket.Slug, o.LogicalKey)
 	return o, e
@@ -233,14 +282,29 @@ func (s *Service) DownloadURL(ctx context.Context, c Credential, key string, exp
 	if o.Status != "ready" {
 		return "", errors.New("object is not ready")
 	}
-	return s.S3.PresignGet(ctx, o.PhysicalKey, time.Duration(expires)*time.Second, filename)
+	b, e := s.Storage.backend(o.SourceID)
+	if e != nil {
+		return "", e
+	}
+	if b.Kind() == "s3" {
+		return b.PresignGet(ctx, o.PhysicalKey, time.Duration(expires)*time.Second, filename)
+	}
+	token := secretbox.Random("rvs_dl_", 24)
+	if e = s.DB.CreateDownloadToken(ctx, secretbox.Hash(token), o.ID, time.Now().Add(time.Duration(expires)*time.Second)); e != nil {
+		return "", e
+	}
+	return s.Config.PublicURL + "/transfer/download/" + token, nil
 }
 func (s *Service) Delete(ctx context.Context, c Credential, key string) error {
 	o, e := s.DB.GetObject(ctx, c.Bucket.ID, key)
 	if e != nil {
 		return e
 	}
-	if e = s.S3.Delete(ctx, o.PhysicalKey); e != nil {
+	b, e := s.Storage.backend(o.SourceID)
+	if e != nil {
+		return e
+	}
+	if e = b.Delete(ctx, o.PhysicalKey); e != nil {
 		return e
 	}
 	e = s.DB.DeleteObject(ctx, o.ID)
@@ -250,6 +314,9 @@ func (s *Service) Delete(ctx context.Context, c Credential, key string) error {
 	return e
 }
 func (s *Service) NewPublicLink(ctx context.Context, c Credential, key string, signTTL, linkTTL int64) (string, string, string, error) {
+	if signTTL < 1 {
+		return "", "", "", errors.New("sign_expires_in is required")
+	}
 	if linkTTL < 0 {
 		return "", "", "", errors.New("link_expires_in cannot be negative")
 	}
@@ -260,7 +327,18 @@ func (s *Service) NewPublicLink(ctx context.Context, c Credential, key string, s
 	if o.Status != "ready" {
 		return "", "", "", errors.New("object is not ready")
 	}
-	direct, e := s.S3.PresignGet(ctx, o.PhysicalKey, time.Duration(signTTL)*time.Second, "")
+	b, e := s.Storage.backend(o.SourceID)
+	if e != nil {
+		return "", "", "", e
+	}
+	var direct string
+	if b.Kind() == "s3" {
+		direct, e = b.PresignGet(ctx, o.PhysicalKey, time.Duration(signTTL)*time.Second, "")
+	} else {
+		token := secretbox.Random("rvs_dl_", 24)
+		e = s.DB.CreateDownloadToken(ctx, secretbox.Hash(token), o.ID, time.Now().Add(time.Duration(signTTL)*time.Second))
+		direct = s.Config.PublicURL + "/transfer/download/" + token
+	}
 	if e != nil {
 		return "", "", "", e
 	}
@@ -288,6 +366,23 @@ func (s *Service) ResolvePublic(ctx context.Context, slug string) (string, error
 	if e != nil {
 		return "", e
 	}
-	return s.S3.PresignGet(ctx, o.PhysicalKey, time.Duration(ttl)*time.Second, "")
+	b, e := s.Storage.backend(o.SourceID)
+	if e != nil {
+		return "", e
+	}
+	if b.Kind() == "s3" {
+		return b.PresignGet(ctx, o.PhysicalKey, time.Duration(ttl)*time.Second, "")
+	}
+	token := secretbox.Random("rvs_dl_", 24)
+	if e = s.DB.CreateDownloadToken(ctx, secretbox.Hash(token), o.ID, time.Now().Add(time.Duration(ttl)*time.Second)); e != nil {
+		return "", e
+	}
+	return s.Config.PublicURL + "/transfer/download/" + token, nil
+}
+func (s *Service) RelayUpload(ctx context.Context, token string, body io.Reader, size int64) error {
+	return s.Storage.relayUpload(ctx, token, body, size)
+}
+func (s *Service) RelayDownload(ctx context.Context, token string) (io.ReadCloser, provider.Head, error) {
+	return s.Storage.relayDownload(ctx, token)
 }
 func IsNotFound(e error) bool { return errors.Is(e, sql.ErrNoRows) }

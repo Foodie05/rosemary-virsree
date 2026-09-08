@@ -4,7 +4,7 @@ The examples use one gateway origin, such as `https://storage.example.com`. JSON
 
 ## Authentication
 
-Administrative routes require `Authorization: Bearer <RVS_ADMIN_TOKEN>`.
+The browser console uses an OIDC session cookie. Administrative automation may use `Authorization: Bearer <RVS_ADMIN_TOKEN>`.
 
 Virtual application routes require:
 
@@ -20,6 +20,9 @@ The `/s3` routes use AWS Signature Version 4 with the virtual AK/SK. Permissions
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/api/v1/overview` | Capacity, bucket, object, key and backend status |
+| `GET` | `/api/v1/setup/status` | OOBE completion and source count |
+| `GET` | `/api/v1/storage-sources` | List redacted S3/WebDAV source metadata |
+| `POST` | `/api/v1/storage-sources` | Verify and add an encrypted storage source |
 | `GET` | `/api/v1/buckets` | List virtual buckets and usage |
 | `POST` | `/api/v1/buckets` | Create a virtual bucket and one-time owner credential |
 | `GET` | `/api/v1/access-keys` | List key metadata without secrets |
@@ -82,7 +85,7 @@ It returns the gateway S3 endpoint, virtual bucket, region, virtual AK/SK, and p
 | `manage` | `POST` | `/api/v1/buckets/{bucket}/objects/invalidate-links` | `key` |
 | `delete` | `DELETE` | `/api/v1/buckets/{bucket}/objects/{key...}` | none |
 
-Every S3 signature request requires an application-selected positive expiry. AWS-compatible backends using SigV4 cap it at 604800 seconds. Rosemary does not shorten a valid requested duration.
+Every capability request requires an application-selected positive expiry. S3-compatible backends using SigV4 cap it at 604800 seconds. Rosemary does not shorten a valid requested duration. Responses include `direct`: S3 is `true`; generic WebDAV is `false` because the capability URL relays bytes through Rosemary.
 
 The public-link response contains `slug`, `public_url`, and `direct_url`. `public_url` is a Rosemary alias that can keep working until `link_expires_in`; each visit redirects to a new real URL valid for `sign_expires_in`. Revoke it with the `slug`. Already issued `direct_url` values bypass Rosemary and remain usable until their chosen expiry unless the object physical key is rotated.
 
@@ -104,4 +107,4 @@ Configure clients with endpoint `https://storage.example.com/s3`, the returned r
 
 ## Central gateway invariant
 
-Applications only need the gateway origin. All authentication, policy, metadata, signing, quota, onboarding and link management enter that origin. A successful signing response is the handoff point: subsequent object bytes use the returned `RVS_S3_PUBLIC_ENDPOINT` URL directly.
+Applications only need the gateway origin. All authentication, policy, metadata, signing, quota, onboarding and link management enter that origin. For S3 sources, a successful signing response hands object bytes to the S3 direct/CDN endpoint. WebDAV has no generic presign standard and uses a short-lived relay capability instead.
