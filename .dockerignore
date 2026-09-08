@@ -1,0 +1,14 @@
+.git
+.env
+.env.*
+!.env.example
+.local
+*.db
+*.db-*
+bin
+downloads
+release
+web/node_modules
+web/dist
+*.log
+*.tsbuildinfo

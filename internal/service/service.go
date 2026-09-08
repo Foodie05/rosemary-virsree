@@ -1,0 +1,293 @@
+package service
+
+import (
+	"context"
+	"crypto/subtle"
+	"database/sql"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"rosemary-virsree/internal/config"
+	"rosemary-virsree/internal/model"
+	"rosemary-virsree/internal/provider"
+	"rosemary-virsree/internal/secretbox"
+	"rosemary-virsree/internal/store"
+)
+
+var slugRx = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
+
+type Service struct {
+	DB     *store.Store
+	S3     *provider.S3
+	Box    *secretbox.Box
+	Config config.Config
+}
+type Credential struct {
+	AccessKey, SecretKey string `json:"-"`
+	Bucket               model.Bucket
+	Key                  model.AccessKey
+}
+
+func New(db *store.Store, p *provider.S3, b *secretbox.Box, c config.Config) *Service {
+	return &Service{DB: db, S3: p, Box: b, Config: c}
+}
+func (s *Service) NewBucket(ctx context.Context, name, slug, visibility string, quota int64) (model.Bucket, error) {
+	slug = strings.ToLower(strings.TrimSpace(slug))
+	if !slugRx.MatchString(slug) {
+		return model.Bucket{}, errors.New("slug must be 3-63 lowercase letters, numbers or hyphens")
+	}
+	if visibility != "private" && visibility != "public" {
+		return model.Bucket{}, errors.New("visibility must be private or public")
+	}
+	b := model.Bucket{ID: secretbox.Random("bkt_", 12), Name: name, Slug: slug, Visibility: visibility, QuotaBytes: quota, CreatedAt: time.Now().UTC()}
+	b, e := s.DB.CreateBucket(ctx, b, s.Config.TotalQuota)
+	if e == nil {
+		s.DB.Audit(ctx, "bucket.created", slug, fmt.Sprintf("quota=%d visibility=%s", quota, visibility))
+	}
+	return b, e
+}
+func (s *Service) NewKey(ctx context.Context, b model.Bucket, name, perms string) (model.AccessKey, string, error) {
+	if perms == "" {
+		perms = "read,write,delete,manage"
+	}
+	seen := map[string]bool{}
+	var normalized []string
+	for _, permission := range strings.Split(perms, ",") {
+		permission = strings.TrimSpace(permission)
+		if permission != "read" && permission != "write" && permission != "delete" && permission != "manage" {
+			return model.AccessKey{}, "", fmt.Errorf("unknown permission %q", permission)
+		}
+		if !seen[permission] {
+			seen[permission] = true
+			normalized = append(normalized, permission)
+		}
+	}
+	if len(normalized) == 0 {
+		return model.AccessKey{}, "", errors.New("at least one permission is required")
+	}
+	perms = strings.Join(normalized, ",")
+	secret := secretbox.Random("rvs_", 30)
+	cipher, e := s.Box.Seal(secret)
+	if e != nil {
+		return model.AccessKey{}, "", e
+	}
+	k := model.AccessKey{ID: secretbox.Random("key_", 10), BucketID: b.ID, Name: name, AK: secretbox.Random("RVS", 12), SecretCipher: cipher, Permissions: perms, CreatedAt: time.Now().UTC()}
+	e = s.DB.CreateAccessKey(ctx, k)
+	if e == nil {
+		s.DB.Audit(ctx, "access-key.created", b.Slug, k.AK)
+	}
+	return k, secret, e
+}
+func (s *Service) Authenticate(ctx context.Context, ak, secret, permission string) (Credential, error) {
+	k, b, e := s.DB.AccessByAK(ctx, ak)
+	if e != nil {
+		return Credential{}, errors.New("invalid credentials")
+	}
+	if k.Revoked {
+		return Credential{}, errors.New("credential revoked")
+	}
+	plain, e := s.Box.Open(k.SecretCipher)
+	if e != nil || subtle.ConstantTimeCompare([]byte(plain), []byte(secret)) != 1 {
+		return Credential{}, errors.New("invalid credentials")
+	}
+	if !has(k.Permissions, permission) {
+		return Credential{}, errors.New("permission denied")
+	}
+	return Credential{AccessKey: ak, SecretKey: plain, Bucket: b, Key: k}, nil
+}
+func has(csv, v string) bool {
+	for _, p := range strings.Split(csv, ",") {
+		if strings.TrimSpace(p) == v {
+			return true
+		}
+	}
+	return false
+}
+func (s *Service) CreateBootstrap(ctx context.Context, name string, maxQuota int64, ttl time.Duration) (string, model.BootstrapToken, error) {
+	if ttl < time.Minute {
+		return "", model.BootstrapToken{}, errors.New("bootstrap token lifetime must be at least one minute")
+	}
+	if maxQuota <= 0 {
+		return "", model.BootstrapToken{}, errors.New("bootstrap maximum quota must be greater than zero")
+	}
+	raw := secretbox.Random("rvs_boot_", 24)
+	t := model.BootstrapToken{ID: secretbox.Random("boot_", 10), Name: name, TokenHash: secretbox.Hash(raw), MaxQuota: maxQuota, ExpiresAt: time.Now().Add(ttl).UTC()}
+	e := s.DB.CreateBootstrap(ctx, t)
+	if e == nil {
+		s.DB.Audit(ctx, "bootstrap.created", t.ID, name)
+	}
+	return raw, t, e
+}
+func (s *Service) Claim(ctx context.Context, token, name, slug, visibility string, quota int64) (model.Bucket, model.AccessKey, string, error) {
+	hash := secretbox.Hash(token)
+	t, e := s.DB.InspectBootstrap(ctx, hash)
+	if e != nil {
+		return model.Bucket{}, model.AccessKey{}, "", e
+	}
+	if quota > t.MaxQuota {
+		return model.Bucket{}, model.AccessKey{}, "", errors.New("requested quota exceeds bootstrap allowance")
+	}
+	slug = strings.ToLower(strings.TrimSpace(slug))
+	if quota <= 0 || !slugRx.MatchString(slug) || (visibility != "private" && visibility != "public") {
+		return model.Bucket{}, model.AccessKey{}, "", errors.New("invalid virtual bucket request")
+	}
+	if _, bucketErr := s.DB.GetBucket(ctx, slug); bucketErr == nil {
+		return model.Bucket{}, model.AccessKey{}, "", errors.New("virtual bucket already exists")
+	} else if !errors.Is(bucketErr, sql.ErrNoRows) {
+		return model.Bucket{}, model.AccessKey{}, "", bucketErr
+	}
+	if _, e = s.DB.ClaimBootstrap(ctx, hash); e != nil {
+		return model.Bucket{}, model.AccessKey{}, "", e
+	}
+	b, e := s.NewBucket(ctx, name, slug, visibility, quota)
+	if e != nil {
+		return b, model.AccessKey{}, "", e
+	}
+	k, secret, e := s.NewKey(ctx, b, "owner", "read,write,delete,manage")
+	return b, k, secret, e
+}
+func physical(b model.Bucket, key string, generation int64) string {
+	return fmt.Sprintf("rosemary/%s/g%d/%s", b.ID, generation, strings.TrimPrefix(key, "/"))
+}
+func stagingPhysical(b model.Bucket, uploadID, key string) string {
+	return fmt.Sprintf("rosemary-staging/%s/%s/%s", b.ID, uploadID, strings.TrimPrefix(key, "/"))
+}
+func (s *Service) BeginUpload(ctx context.Context, c Credential, key, contentType string, size, expires int64) (model.Object, string, error) {
+	if size < 0 {
+		return model.Object{}, "", errors.New("size is required")
+	}
+	key = strings.TrimPrefix(key, "/")
+	if key == "" || len([]byte(key)) > 1024 {
+		return model.Object{}, "", errors.New("key must contain 1-1024 UTF-8 bytes")
+	}
+	if expires < 1 {
+		return model.Object{}, "", errors.New("expires_in is required")
+	}
+	gen := time.Now().UnixNano()
+	o := model.Object{ID: secretbox.Random("obj_", 12), BucketID: c.Bucket.ID, LogicalKey: key, Size: size, ContentType: contentType, Generation: gen, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	o.PhysicalKey = stagingPhysical(c.Bucket, o.ID, o.LogicalKey)
+	if e := s.DB.ReserveObject(ctx, o, time.Now().Add(time.Duration(expires)*time.Second), s.Config.MaxObjectsPerBucket, s.Config.MaxPendingUploads); e != nil {
+		return o, "", e
+	}
+	u, e := s.S3.PresignPut(ctx, o.PhysicalKey, contentType, size, time.Duration(expires)*time.Second)
+	if e != nil {
+		_ = s.DB.CancelUpload(ctx, o.ID)
+		return o, "", e
+	}
+	s.DB.Audit(ctx, "upload.signed", c.Bucket.Slug, o.LogicalKey)
+	return o, u, nil
+}
+func (s *Service) CommitUpload(ctx context.Context, c Credential, id, key string) (model.Object, error) {
+	o, e := s.DB.GetUpload(ctx, c.Bucket.ID, id, key)
+	if e != nil {
+		return o, e
+	}
+	h, e := s.S3.Head(ctx, o.PhysicalKey)
+	if e != nil {
+		return o, e
+	}
+	if h.Size != o.Size {
+		return o, fmt.Errorf("uploaded size %d does not match reserved size %d", h.Size, o.Size)
+	}
+	stagingPhysical := o.PhysicalKey
+	finalGeneration := time.Now().UnixNano()
+	if finalGeneration == o.Generation {
+		finalGeneration++
+	}
+	finalPhysical := physical(c.Bucket, o.LogicalKey, finalGeneration)
+	o.PhysicalKey = finalPhysical
+	if e = s.S3.Copy(ctx, stagingPhysical, finalPhysical); e != nil {
+		return o, fmt.Errorf("promote staged upload: %w", e)
+	}
+	finalHead, e := s.S3.Head(ctx, finalPhysical)
+	if e != nil || finalHead.Size != h.Size {
+		_ = s.S3.Delete(ctx, finalPhysical)
+		if e != nil {
+			return o, fmt.Errorf("verify promoted upload: %w", e)
+		}
+		return o, errors.New("promoted upload size mismatch")
+	}
+	o, oldPhysical, e := s.DB.CommitUpload(ctx, o, finalHead.ETag, finalHead.Size)
+	if e != nil {
+		_ = s.S3.Delete(ctx, finalPhysical)
+		return o, e
+	}
+	_ = s.S3.Delete(ctx, stagingPhysical)
+	if oldPhysical != "" && oldPhysical != o.PhysicalKey {
+		_ = s.S3.Delete(ctx, oldPhysical)
+	}
+	s.DB.Audit(ctx, "upload.committed", c.Bucket.Slug, o.LogicalKey)
+	return o, e
+}
+func (s *Service) DownloadURL(ctx context.Context, c Credential, key string, expires int64, filename string) (string, error) {
+	if expires < 1 {
+		return "", errors.New("expires_in is required")
+	}
+	o, e := s.DB.GetObject(ctx, c.Bucket.ID, key)
+	if e != nil {
+		return "", e
+	}
+	if o.Status != "ready" {
+		return "", errors.New("object is not ready")
+	}
+	return s.S3.PresignGet(ctx, o.PhysicalKey, time.Duration(expires)*time.Second, filename)
+}
+func (s *Service) Delete(ctx context.Context, c Credential, key string) error {
+	o, e := s.DB.GetObject(ctx, c.Bucket.ID, key)
+	if e != nil {
+		return e
+	}
+	if e = s.S3.Delete(ctx, o.PhysicalKey); e != nil {
+		return e
+	}
+	e = s.DB.DeleteObject(ctx, o.ID)
+	if e == nil {
+		s.DB.Audit(ctx, "object.deleted", c.Bucket.Slug, key)
+	}
+	return e
+}
+func (s *Service) NewPublicLink(ctx context.Context, c Credential, key string, signTTL, linkTTL int64) (string, string, string, error) {
+	if linkTTL < 0 {
+		return "", "", "", errors.New("link_expires_in cannot be negative")
+	}
+	o, e := s.DB.GetObject(ctx, c.Bucket.ID, key)
+	if e != nil {
+		return "", "", "", e
+	}
+	if o.Status != "ready" {
+		return "", "", "", errors.New("object is not ready")
+	}
+	direct, e := s.S3.PresignGet(ctx, o.PhysicalKey, time.Duration(signTTL)*time.Second, "")
+	if e != nil {
+		return "", "", "", e
+	}
+	slug := secretbox.Random("pub_", 18)
+	var expiry *time.Time
+	if linkTTL > 0 {
+		t := time.Now().Add(time.Duration(linkTTL) * time.Second).UTC()
+		expiry = &t
+	}
+	if e = s.DB.CreatePublicLink(ctx, secretbox.Random("lnk_", 10), o.ID, slug, signTTL, expiry); e != nil {
+		return "", "", "", e
+	}
+	s.DB.Audit(ctx, "public-link.created", c.Bucket.Slug, key)
+	return slug, s.Config.PublicURL + "/p/" + slug, direct, nil
+}
+func (s *Service) RevokePublicLink(ctx context.Context, c Credential, slug string) error {
+	if e := s.DB.RevokePublicLink(ctx, c.Bucket.ID, slug); e != nil {
+		return e
+	}
+	s.DB.Audit(ctx, "public-link.revoked", c.Bucket.Slug, slug)
+	return nil
+}
+func (s *Service) ResolvePublic(ctx context.Context, slug string) (string, error) {
+	o, ttl, e := s.DB.PublicObject(ctx, slug)
+	if e != nil {
+		return "", e
+	}
+	return s.S3.PresignGet(ctx, o.PhysicalKey, time.Duration(ttl)*time.Second, "")
+}
+func IsNotFound(e error) bool { return errors.Is(e, sql.ErrNoRows) }

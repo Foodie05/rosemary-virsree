@@ -1,0 +1,10 @@
+/bin/
+/downloads/
+/release/
+/.local/
+/rosemary.db*
+/.env
+/web/node_modules/
+/web/dist/
+*.tsbuildinfo
+*.log
