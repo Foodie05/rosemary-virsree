@@ -199,13 +199,17 @@ func (s *Server) addStorageSource(w http.ResponseWriter, r *http.Request) {
 	source, err := s.svc.Storage.Add(r.Context(), in)
 	if err != nil {
 		problem := errorFor(err.Error(), http.StatusBadRequest)
+		kind := strings.ToLower(strings.TrimSpace(in.Kind))
+		if kind != "s3" && kind != "webdav" {
+			kind = "invalid"
+		}
 		slog.Warn("storage source rejected",
 			"request_id", requestID(r),
 			"error_code", problem.Code,
-			"storage_kind", strings.ToLower(strings.TrimSpace(in.Kind)),
-			"endpoint_id", endpointFingerprint(in.Endpoint),
-			"public_endpoint_id", endpointFingerprint(in.PublicEndpoint),
-			"cdn_endpoint_id", endpointFingerprint(in.CDNEndpoint),
+			"storage_kind", kind,
+			"endpoint_id", endpointFingerprint(in.Endpoint, s.svc.Config.MasterKey),
+			"public_endpoint_id", endpointFingerprint(in.PublicEndpoint, s.svc.Config.MasterKey),
+			"cdn_endpoint_id", endpointFingerprint(in.CDNEndpoint, s.svc.Config.MasterKey),
 			"path_style", in.PathStyle,
 		)
 		fail(w, r, 400, err.Error())

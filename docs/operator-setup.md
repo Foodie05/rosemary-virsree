@@ -94,4 +94,4 @@ curl -fsS https://storage.cruty.cn/api/v1/meta
 sudo journalctl -u rosemary-virsree --since today | grep 'req_example'
 ```
 
-请求日志只记录追踪编号、HTTP 方法、注册路由模板、状态码、耗时和稳定错误代码。存储验证失败时会额外记录存储类型、Path-style 选项，以及根据 Endpoint 主机名生成的短 SHA-256 标识。VirSree 不记录查询字符串、真实桶名和对象名、原始 Endpoint 主机名、请求或响应正文、AK/SK、OIDC Token 或签名 URL。主机名标识只用于判断两次尝试是否使用同一地址，无法还原原地址。
+请求日志只记录追踪编号、HTTP 方法、注册路由模板、状态码、耗时和稳定错误代码。存储验证失败时会额外记录存储类型、Path-style 选项，以及使用服务器主密钥对 Endpoint 主机名计算的短 HMAC-SHA-256 标识。VirSree 不记录查询字符串、真实桶名和对象名、原始 Endpoint 主机名、请求或响应正文、AK/SK、OIDC Token 或签名 URL。主机名标识只用于在同一实例内判断两次尝试是否使用同一地址，不能跨实例关联或离线枚举常见域名。

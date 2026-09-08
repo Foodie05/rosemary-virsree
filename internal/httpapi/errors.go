@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
@@ -92,7 +93,7 @@ func fail(w http.ResponseWriter, r *http.Request, status int, raw string) {
 	})
 }
 
-func endpointFingerprint(raw string) string {
+func endpointFingerprint(raw, key string) string {
 	value := strings.TrimSpace(strings.TrimLeft(raw, "."))
 	if value == "" {
 		return "none"
@@ -105,6 +106,7 @@ func endpointFingerprint(raw string) string {
 	if err == nil && u.Hostname() != "" {
 		host = strings.ToLower(u.Hostname())
 	}
-	digest := sha256.Sum256([]byte(host))
-	return "sha256:" + hex.EncodeToString(digest[:6])
+	digest := hmac.New(sha256.New, []byte(key))
+	_, _ = digest.Write([]byte(host))
+	return "hmac-sha256:" + hex.EncodeToString(digest.Sum(nil)[:6])
 }

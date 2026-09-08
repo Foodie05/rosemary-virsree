@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.3 — 2026-09-08
+
+- Key endpoint correlation identifiers with the server master secret so redacted logs cannot be used to enumerate likely endpoint hostnames offline.
+- Constrain logged storage-kind values to the known `s3`, `webdav`, or `invalid` labels.
+
 ## v0.2.2 — 2026-09-08
 
 - Make VirSree the primary product identity across the console, OOBE, Agent prompt, documentation, CLI, and operational messages; retain Rosemary as the parent brand endorsement.

@@ -204,6 +204,15 @@ func TestStorageProviderDetailsAreNotReturned(t *testing.T) {
 	}
 }
 
+func TestEndpointFingerprintIsKeyedAndRedacted(t *testing.T) {
+	a := endpointFingerprint(".s3.example.com", "first-key")
+	b := endpointFingerprint("https://s3.example.com", "first-key")
+	c := endpointFingerprint("s3.example.com", "second-key")
+	if a != b || a == c || strings.Contains(a, "s3.example.com") || !strings.HasPrefix(a, "hmac-sha256:") {
+		t.Fatalf("unexpected endpoint fingerprints: %q %q %q", a, b, c)
+	}
+}
+
 func TestRequestLogRedactsPathAndQueryValues(t *testing.T) {
 	var logs bytes.Buffer
 	previous := slog.Default()
