@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.1 — 2026-09-08
+
+- Validate OIDC ID Tokens through Discovery and JWKS, including RS256 signatures, issuer, audience, time claims, nonce, and UserInfo subject binding.
+
 ## v0.2.0 — 2026-09-08
 
 - Added OIDC Authorization Code + PKCE console login with an exact email allowlist and secure server-side sessions.

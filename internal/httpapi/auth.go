@@ -109,8 +109,13 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		failRedirect("身份服务未能交换登录凭据")
 		return
 	}
-	if token.IDToken == "" || jwtNonce(token.IDToken) != nonce {
-		failRedirect("OIDC nonce 校验失败")
+	if token.IDToken == "" {
+		failRedirect("身份服务未返回 ID Token")
+		return
+	}
+	idSubject, err := verifyIDToken(r.Context(), client, token.IDToken, s.svc.Config.OIDCIssuer, s.svc.Config.OIDCClientID, nonce)
+	if err != nil {
+		failRedirect("ID Token 校验失败")
 		return
 	}
 	userinfoReq, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, s.svc.Config.OIDCIssuer+"/oidc/userinfo", nil)
@@ -126,7 +131,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		Email         string `json:"email"`
 		EmailVerified *bool  `json:"email_verified"`
 	}
-	if userinfoResp.StatusCode >= 300 || json.NewDecoder(io.LimitReader(userinfoResp.Body, 1<<20)).Decode(&user) != nil || user.Subject == "" || user.Email == "" {
+	if userinfoResp.StatusCode >= 300 || json.NewDecoder(io.LimitReader(userinfoResp.Body, 1<<20)).Decode(&user) != nil || user.Subject == "" || user.Subject != idSubject || user.Email == "" {
 		failRedirect("身份服务未返回有效邮箱")
 		return
 	}
@@ -147,24 +152,6 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: adminCookie, Value: rawSession, Path: "/", HttpOnly: true, Secure: strings.HasPrefix(s.svc.Config.PublicURL, "https://"), SameSite: http.SameSiteLaxMode, Expires: expires, MaxAge: int(s.svc.Config.SessionTTL)})
 	http.Redirect(w, r, "/", http.StatusFound)
-}
-
-func jwtNonce(raw string) string {
-	parts := strings.Split(raw, ".")
-	if len(parts) != 3 {
-		return ""
-	}
-	b, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return ""
-	}
-	var claims struct {
-		Nonce string `json:"nonce"`
-	}
-	if json.Unmarshal(b, &claims) != nil {
-		return ""
-	}
-	return claims.Nonce
 }
 
 func containsFold(items []string, wanted string) bool {

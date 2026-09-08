@@ -12,7 +12,7 @@ Rosemary 使用服务端 OIDC Authorization Code + PKCE 流程。生产环境必
 - 一组 confidential client ID / client secret
 - 至少一个允许登录的完整邮箱地址
 
-必须先在身份服务中注册完全一致的 Redirect URI。登录开始时 Rosemary 生成一次性的 `state`、`nonce` 和 PKCE verifier；回调后从 UserInfo 读取邮箱，并与 `RVS_ADMIN_EMAILS` 做不区分大小写的完整匹配。浏览器只保存 Secure、HttpOnly、SameSite=Lax 会话 Cookie，站点不接触用户密码。
+必须先在身份服务中注册完全一致的 Redirect URI。登录开始时 Rosemary 生成一次性的 `state`、`nonce` 和 PKCE verifier；回调时通过 Discovery 与 JWKS 校验 ID Token 的 RS256 签名、issuer、audience、时间声明、nonce，并要求 ID Token 与 UserInfo 的 subject 一致。随后从 UserInfo 读取邮箱，与 `RVS_ADMIN_EMAILS` 做不区分大小写的完整匹配。浏览器只保存 Secure、HttpOnly、SameSite=Lax 会话 Cookie，站点不接触用户密码。
 
 仓库中的脚本会在本机交互读取 client ID、client secret 和白名单邮箱，再通过 SSH 上传到服务器。服务器首次配置时生成管理 API Token 与数据库加密主密钥；以后重跑会保留它们，避免已加密数据失效。脚本不会打印这些值：
 

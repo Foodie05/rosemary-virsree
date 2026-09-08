@@ -2,6 +2,10 @@ package httpapi
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -9,6 +13,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"rosemary-virsree/internal/config"
 	"rosemary-virsree/internal/provider"
@@ -38,15 +43,23 @@ func testServer(t *testing.T) http.Handler {
 
 func TestOIDCLoginCreatesAllowlistedSessionAndStartsOOBE(t *testing.T) {
 	var nonce string
-	issuer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var issuer *httptest.Server
+	issuer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			write(w, 200, map[string]string{"issuer": issuer.URL, "jwks_uri": issuer.URL + "/oidc/jwks"})
+		case "/oidc/jwks":
+			write(w, 200, map[string]any{"keys": []map[string]string{{"kty": "RSA", "kid": "test-key", "alg": "RS256", "use": "sig", "n": base64.RawURLEncoding.EncodeToString(privateKey.N.Bytes()), "e": "AQAB"}}})
 		case "/oidc/token":
 			var body map[string]string
 			if r.Header.Get("Content-Type") != "application/json" || json.NewDecoder(r.Body).Decode(&body) != nil || body["code_verifier"] == "" {
 				t.Error("token request did not use JSON with PKCE verifier")
 			}
-			claims, _ := json.Marshal(map[string]string{"nonce": nonce})
-			idToken := "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".signature"
+			idToken := signedTestIDToken(t, privateKey, issuer.URL, "client", "user-1", nonce)
 			write(w, 200, map[string]string{"access_token": "access", "id_token": idToken})
 		case "/oidc/userinfo":
 			if r.Header.Get("Authorization") != "Bearer access" {
@@ -107,6 +120,20 @@ func TestOIDCLoginCreatesAllowlistedSessionAndStartsOOBE(t *testing.T) {
 	if got["authenticated"] != true || got["email"] != "admin@example.com" || got["setup_required"] != true {
 		t.Fatalf("unexpected session: %#v", got)
 	}
+}
+
+func signedTestIDToken(t *testing.T, key *rsa.PrivateKey, issuer, audience, subject, nonce string) string {
+	t.Helper()
+	header, _ := json.Marshal(map[string]string{"alg": "RS256", "kid": "test-key", "typ": "JWT"})
+	now := time.Now()
+	claims, _ := json.Marshal(map[string]any{"iss": issuer, "aud": audience, "sub": subject, "nonce": nonce, "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix()})
+	unsigned := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claims)
+	digest := sha256.Sum256([]byte(unsigned))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return unsigned + "." + base64.RawURLEncoding.EncodeToString(signature)
 }
 
 func request(t *testing.T, h http.Handler, method, path, token string, body any) *httptest.ResponseRecorder {
