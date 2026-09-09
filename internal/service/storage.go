@@ -32,6 +32,8 @@ type StorageSourceInput struct {
 	SecretKey               string `json:"secret_key"`
 	PathStyle               bool   `json:"path_style"`
 	CDNEndpoint             string `json:"cdn_endpoint"`
+	CDNMode                 string `json:"cdn_mode"`
+	CDNAuthKey              string `json:"cdn_auth_key"`
 	WebDAVUsername          string `json:"webdav_username"`
 	WebDAVPassword          string `json:"webdav_password"`
 	AcknowledgeBucketChange bool   `json:"acknowledge_bucket_change"`
@@ -43,16 +45,18 @@ type StorageSourceDetail struct {
 	Region                   string `json:"region"`
 	Bucket                   string `json:"bucket"`
 	CDNEndpoint              string `json:"cdn_endpoint"`
+	CDNMode                  string `json:"cdn_mode"`
 	PathStyle                bool   `json:"path_style"`
 	AccessKeyConfigured      bool   `json:"access_key_configured"`
 	SecretKeyConfigured      bool   `json:"secret_key_configured"`
 	WebDAVUsernameConfigured bool   `json:"webdav_username_configured"`
 	WebDAVPasswordConfigured bool   `json:"webdav_password_configured"`
+	CDNAuthKeyConfigured     bool   `json:"cdn_auth_key_configured"`
 }
 type storedSourceConfig struct {
 	Endpoint, PublicEndpoint, Region, Bucket, AccessKey, SecretKey string
 	PathStyle                                                      bool
-	CDNEndpoint, Username, Password                                string
+	CDNEndpoint, CDNMode, CDNAuthKey, Username, Password           string
 }
 type sourceRuntime struct {
 	meta    model.StorageSource
@@ -103,7 +107,11 @@ func backendFor(kind string, c storedSourceConfig) (provider.Backend, error) {
 		if c.CDNEndpoint != "" {
 			download = c.CDNEndpoint
 		}
-		return provider.New(config.Backend{Endpoint: c.Endpoint, PublicEndpoint: public, DownloadEndpoint: download, Region: c.Region, Bucket: c.Bucket, AccessKey: c.AccessKey, SecretKey: c.SecretKey, PathStyle: c.PathStyle}), nil
+		return provider.New(config.Backend{
+			Endpoint: c.Endpoint, PublicEndpoint: public, DownloadEndpoint: download, DownloadMode: c.CDNMode,
+			DownloadAuthKey: c.CDNAuthKey, Region: c.Region, Bucket: c.Bucket, AccessKey: c.AccessKey,
+			SecretKey: c.SecretKey, PathStyle: c.PathStyle,
+		}), nil
 	case "webdav":
 		return provider.NewWebDAV(provider.WebDAVConfig{Endpoint: c.Endpoint, Username: c.Username, Password: c.Password}), nil
 	default:
@@ -128,6 +136,9 @@ func (m *StorageManager) prepare(ctx context.Context, in StorageSourceInput, exi
 		if in.WebDAVPassword == "" {
 			in.WebDAVPassword = existing.Password
 		}
+		if in.CDNAuthKey == "" && in.CDNMode == existing.CDNMode && strings.TrimRight(strings.TrimSpace(in.CDNEndpoint), "/") == strings.TrimRight(existing.CDNEndpoint, "/") {
+			in.CDNAuthKey = existing.CDNAuthKey
+		}
 	}
 	var e error
 	if in.Endpoint, e = normalizeEndpoint(in.Endpoint, in.Kind == "s3"); e != nil {
@@ -142,6 +153,12 @@ func (m *StorageManager) prepare(ctx context.Context, in StorageSourceInput, exi
 	if in.Kind == "s3" {
 		in.Endpoint = normalizeS3ServiceEndpoint(in.Endpoint, in.Bucket)
 		in.PublicEndpoint = normalizeS3ServiceEndpoint(in.PublicEndpoint, in.Bucket)
+		in.CDNMode = strings.ToLower(strings.TrimSpace(in.CDNMode))
+		if in.CDNEndpoint == "" {
+			in.CDNMode, in.CDNAuthKey = "", ""
+		} else if in.CDNMode == "" {
+			in.CDNMode = "s3_sigv4"
+		}
 	}
 	if in.Name == "" || in.CapacityBytes <= 0 {
 		return in, storedSourceConfig{}, nil, errors.New("name and positive capacity_bytes are required")
@@ -149,10 +166,23 @@ func (m *StorageManager) prepare(ctx context.Context, in StorageSourceInput, exi
 	if in.Kind == "s3" && (in.Region == "" || in.Bucket == "" || in.AccessKey == "" || in.SecretKey == "") {
 		return in, storedSourceConfig{}, nil, errors.New("region, bucket, access_key and secret_key are required for S3")
 	}
+	if in.Kind == "s3" && in.CDNEndpoint != "" && in.CDNMode != "s3_sigv4" && in.CDNMode != "bitiful_token" {
+		return in, storedSourceConfig{}, nil, errors.New("CDN mode must be s3_sigv4 or bitiful_token")
+	}
+	if in.Kind == "s3" && in.CDNEndpoint != "" && in.CDNMode == "bitiful_token" && in.CDNAuthKey == "" {
+		return in, storedSourceConfig{}, nil, errors.New("Bitiful CDN authentication key is required")
+	}
+	if in.CDNMode != "bitiful_token" {
+		in.CDNAuthKey = ""
+	}
 	if in.Kind == "webdav" && (in.Endpoint == "" || in.WebDAVUsername == "" || in.WebDAVPassword == "") {
 		return in, storedSourceConfig{}, nil, errors.New("endpoint, webdav_username and webdav_password are required for WebDAV")
 	}
-	c := storedSourceConfig{Endpoint: in.Endpoint, PublicEndpoint: in.PublicEndpoint, Region: in.Region, Bucket: in.Bucket, AccessKey: in.AccessKey, SecretKey: in.SecretKey, PathStyle: in.PathStyle, CDNEndpoint: in.CDNEndpoint, Username: in.WebDAVUsername, Password: in.WebDAVPassword}
+	c := storedSourceConfig{
+		Endpoint: in.Endpoint, PublicEndpoint: in.PublicEndpoint, Region: in.Region, Bucket: in.Bucket,
+		AccessKey: in.AccessKey, SecretKey: in.SecretKey, PathStyle: in.PathStyle, CDNEndpoint: in.CDNEndpoint,
+		CDNMode: in.CDNMode, CDNAuthKey: in.CDNAuthKey, Username: in.WebDAVUsername, Password: in.WebDAVPassword,
+	}
 	b, e := backendFor(in.Kind, c)
 	if e != nil {
 		return in, c, nil, e
@@ -204,9 +234,10 @@ func (m *StorageManager) Detail(ctx context.Context, id string) (StorageSourceDe
 	}
 	return StorageSourceDetail{
 		StorageSource: v, Endpoint: c.Endpoint, PublicEndpoint: c.PublicEndpoint,
-		Region: c.Region, Bucket: c.Bucket, CDNEndpoint: c.CDNEndpoint, PathStyle: c.PathStyle,
+		Region: c.Region, Bucket: c.Bucket, CDNEndpoint: c.CDNEndpoint, CDNMode: c.CDNMode, PathStyle: c.PathStyle,
 		AccessKeyConfigured: c.AccessKey != "", SecretKeyConfigured: c.SecretKey != "",
 		WebDAVUsernameConfigured: c.Username != "", WebDAVPasswordConfigured: c.Password != "",
+		CDNAuthKeyConfigured: c.CDNAuthKey != "",
 	}, nil
 }
 

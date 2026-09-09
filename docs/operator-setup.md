@@ -51,9 +51,14 @@ S3 来源需要真实私有桶、Region、AK/SK，以及可选的三类 Endpoint
 |---|---|
 | 内部 API Endpoint | VirSree 执行 HEAD、COPY、DELETE 和 commit 验证 |
 | 应用直传 Endpoint | 生成上传签名；留空时使用内部 Endpoint |
-| 下载 CDN Endpoint | 只生成下载签名；留空时使用应用直传 Endpoint |
+| 下载 CDN 加速域名 | 只生成下载链接；留空时使用应用直传 Endpoint |
 
-下载 CDN Endpoint 必须兼容 S3 SigV4，并保留签名时使用的 Host、路径和查询参数。它适合带 S3 兼容域名的 OSS/COS/R2/MinIO 网关。CloudFront 私钥签名、阿里云 CDN 鉴权 URL 等供应商专有算法不能直接填入此字段，需要专门的签名适配器。
+填写下载 CDN 后必须选择与服务端一致的鉴权方式：
+
+- **缤纷云高级鉴权**：适用于启用了高级鉴权的缤纷云 CDN 项目。再填写该项目的“鉴权 Key”；VirSree 按应用每次提交的 `expires_in` 生成 `_ts`，并在服务端计算 `_btf_tk`。Key 与存储凭据一同加密保存，API 和日志不回显。
+- **S3 SigV4 兼容**：只适用于明确接受 AWS SigV4 预签名 GET 的下载 Endpoint。普通 CDN 自定义域名通常不属于这一类。
+
+缤纷云 CDN 加速域名若启用了高级鉴权，直接访问返回 403 是预期行为。把它误选成 S3 SigV4 会因签名协议不同而验证失败。CloudFront 私钥签名、阿里云 CDN 鉴权 URL 等其他供应商算法仍需要相应的签名适配器。
 
 S3 来源的上传和下载文件正文都不经过 VirSree。控制请求进入统一网关，响应的 `url` 指向 S3 或配置的兼容 CDN，且 `direct: true`。
 
@@ -100,4 +105,4 @@ curl -fsS https://storage.cruty.cn/api/v1/meta
 sudo journalctl -u rosemary-virsree --since today | grep 'req_example'
 ```
 
-请求日志只记录追踪编号、HTTP 方法、注册路由模板、状态码、耗时和稳定错误代码。存储验证失败时会额外记录存储类型、Path-style 选项，以及使用服务器主密钥对 Endpoint 主机名计算的短 HMAC-SHA-256 标识。VirSree 不记录查询字符串、真实桶名和对象名、原始 Endpoint 主机名、请求或响应正文、AK/SK、OIDC Token 或签名 URL。主机名标识只用于在同一实例内判断两次尝试是否使用同一地址，不能跨实例关联或离线枚举常见域名。
+请求日志只记录追踪编号、HTTP 方法、注册路由模板、状态码、耗时和稳定错误代码。存储验证失败时会额外记录存储类型、探针阶段、CDN 鉴权模式、Path-style 选项，以及使用服务器主密钥对 Endpoint 主机名计算的短 HMAC-SHA-256 标识。VirSree 不记录查询字符串、真实桶名和对象名、原始 Endpoint 主机名、请求或响应正文、CDN 鉴权 Key、AK/SK、OIDC Token 或签名 URL。主机名标识只用于在同一实例内判断两次尝试是否使用同一地址，不能跨实例关联或离线枚举常见域名。

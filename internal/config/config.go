@@ -24,6 +24,7 @@ type Config struct {
 type Backend struct {
 	Endpoint, PublicEndpoint, DownloadEndpoint, Region, Bucket, AccessKey, SecretKey string
 	PathStyle                                                                        bool
+	DownloadMode, DownloadAuthKey                                                    string
 }
 
 func Load() (Config, error) {

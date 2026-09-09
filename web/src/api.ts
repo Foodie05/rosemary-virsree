@@ -4,8 +4,9 @@ export type AccessKey={id:string;name:string;access_key:string;permissions:strin
 export type ObjectInfo={id:string;source_id:string;key:string;size:number;content_type:string;etag:string;status:string;generation:number;created_at:string;updated_at:string}
 export type Session={authenticated:boolean;email:string;oidc_configured:boolean;setup_required:boolean}
 export type StorageSource={id:string;name:string;kind:'s3'|'webdav';priority:number;capacity_bytes:number;used_bytes:number;reserved_bytes:number;enabled:boolean;direct_transfer:boolean;cdn_enabled:boolean;created_at:string}
-export type StorageSourceDetail=StorageSource&{endpoint:string;public_endpoint:string;region:string;bucket:string;cdn_endpoint:string;path_style:boolean;access_key_configured:boolean;secret_key_configured:boolean;webdav_username_configured:boolean;webdav_password_configured:boolean}
-export type StorageSourceInput={name:string;kind:'s3'|'webdav';priority:number;capacity_bytes:number;endpoint:string;public_endpoint?:string;region?:string;bucket?:string;access_key?:string;secret_key?:string;path_style?:boolean;cdn_endpoint?:string;webdav_username?:string;webdav_password?:string;acknowledge_bucket_change?:boolean}
+export type CDNMode='s3_sigv4'|'bitiful_token'
+export type StorageSourceDetail=StorageSource&{endpoint:string;public_endpoint:string;region:string;bucket:string;cdn_endpoint:string;cdn_mode:CDNMode|'';path_style:boolean;access_key_configured:boolean;secret_key_configured:boolean;cdn_auth_key_configured:boolean;webdav_username_configured:boolean;webdav_password_configured:boolean}
+export type StorageSourceInput={name:string;kind:'s3'|'webdav';priority:number;capacity_bytes:number;endpoint:string;public_endpoint?:string;region?:string;bucket?:string;access_key?:string;secret_key?:string;path_style?:boolean;cdn_endpoint?:string;cdn_mode?:CDNMode;cdn_auth_key?:string;webdav_username?:string;webdav_password?:string;acknowledge_bucket_change?:boolean}
 
 export class API{
   constructor(public token=''){}

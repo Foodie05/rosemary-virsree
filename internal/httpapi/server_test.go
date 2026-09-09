@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -203,6 +204,33 @@ func TestStorageProviderDetailsAreNotReturned(t *testing.T) {
 	}
 	if strings.Contains(problem.ZH, "secret-") || strings.Contains(problem.EN, "secret-") || strings.Contains(problem.EN, "RequestID") {
 		t.Fatalf("provider details leaked in localized error: %#v", problem)
+	}
+}
+
+func TestStorageProbeErrorsPreferTheFailedDataPath(t *testing.T) {
+	tests := []struct {
+		raw, code string
+	}{
+		{"storage verification failed: direct/CDN download probe: Get https://redacted: context deadline exceeded", "storage_cdn_unreachable"},
+		{"storage verification failed: direct/CDN download probe: 403 Forbidden", "storage_cdn_access_denied"},
+		{"storage verification failed: direct upload probe: context deadline exceeded", "storage_upload_failed"},
+	}
+	for _, tc := range tests {
+		if got := errorFor(tc.raw, http.StatusBadRequest); got.Code != tc.code {
+			t.Errorf("errorFor(%q) code = %q; want %q", tc.raw, got.Code, tc.code)
+		}
+	}
+}
+
+func TestStorageProbeLogMetadataIsAllowlisted(t *testing.T) {
+	if got := safeCDNMode(" bitiful_token "); got != "bitiful_token" {
+		t.Fatalf("safe CDN mode = %q", got)
+	}
+	if got := safeCDNMode("secret-mode"); got != "invalid" {
+		t.Fatalf("unrecognized CDN mode leaked: %q", got)
+	}
+	if got := storageProbeStage(errors.New("storage verification failed: direct/CDN download probe: 403 Forbidden")); got != "direct_cdn_download" {
+		t.Fatalf("probe stage = %q", got)
 	}
 }
 

@@ -24,6 +24,16 @@ func errorFor(raw string, status int) localizedError {
 		return localizedError{"storage_kind_immutable", "存储源类型创建后不能更改。请添加一个新的存储源。", "A storage source type cannot be changed after creation. Add a new storage source instead."}
 	case strings.Contains(message, "storage source capacity cannot be lower"):
 		return localizedError{"storage_capacity_too_small", "容量不能低于该存储源已使用和已预留空间的总和。", "Capacity cannot be lower than the source's combined used and reserved space."}
+	case strings.Contains(message, "bitiful cdn authentication key is required"):
+		return localizedError{"storage_cdn_key_required", "使用缤纷云高级鉴权时必须填写 CDN 鉴权 Key。请从缤纷云 CDN 项目的“高级鉴权”配置中取得该 Key。", "Bitiful advanced authentication requires the CDN authentication key. Copy it from Advanced Authentication in the Bitiful CDN project."}
+	case strings.Contains(message, "storage verification failed") && strings.Contains(message, "download probe") && (strings.Contains(message, "403 forbidden") || strings.Contains(message, "accessdenied") || strings.Contains(message, "signaturedoesnotmatch")):
+		return localizedError{"storage_cdn_access_denied", "已连接到下载 CDN，但验证链接被拒绝。请确认所选鉴权方式与 CDN 项目一致，并检查 CDN 鉴权 Key、回源桶和回源路径。", "VirSree reached the download CDN, but the verification URL was rejected. Confirm that the selected authentication mode matches the CDN project, then check the CDN key, origin bucket, and origin path."}
+	case strings.Contains(message, "storage verification failed") && strings.Contains(message, "download probe") && (strings.Contains(message, "deadline exceeded") || strings.Contains(message, "timeout") || strings.Contains(message, "no such host") || strings.Contains(message, "connection refused")):
+		return localizedError{"storage_cdn_unreachable", "下载 CDN 没有在限定时间内完成验证。存储 API 可能仍然正常；请单独检查 CDN 地址、DNS、防火墙和回源配置。", "The download CDN did not complete verification in time. The storage API may still be healthy; check the CDN endpoint, DNS, firewall, and origin configuration."}
+	case strings.Contains(message, "storage verification failed") && strings.Contains(message, "download probe"):
+		return localizedError{"storage_download_failed", "下载 CDN 验证失败。请检查所选鉴权方式、鉴权 Key、回源桶和回源路径。", "Download CDN verification failed. Check the selected authentication mode, authentication key, origin bucket, and origin path."}
+	case strings.Contains(message, "storage verification failed") && strings.Contains(message, "direct upload probe"):
+		return localizedError{"storage_upload_failed", "直传验证失败。请检查公开上传 Endpoint、桶 CORS、写入权限和 Path-style 设置。", "The direct-upload check failed. Check the public upload endpoint, bucket CORS, write permission, and path-style setting."}
 	case strings.Contains(message, "storage verification failed") && (strings.Contains(message, "statuscode: 404") || strings.Contains(message, "notfound") || strings.Contains(message, "404 not found")):
 		return localizedError{"storage_probe_not_found", "VirSree 已连接到存储服务，但找不到刚上传的验证对象。请检查桶名、Endpoint 和 Path-style 设置是否匹配。", "VirSree reached the storage service but could not find the verification object it just uploaded. Check the bucket name, endpoint, and path-style setting."}
 	case strings.Contains(message, "storage verification failed") && (strings.Contains(message, "accessdenied") || strings.Contains(message, "statuscode: 403") || strings.Contains(message, "signaturedoesnotmatch") || strings.Contains(message, "invalidaccesskeyid")):
@@ -32,10 +42,6 @@ func errorFor(raw string, status int) localizedError {
 		return localizedError{"storage_endpoint_invalid", "无法识别存储地址。可以只填写域名，VirSree 会自动补全 HTTPS；也可以填写完整的 HTTP(S) URL。", "The storage endpoint is not recognized. Enter only the domain and VirSree will add HTTPS, or enter a complete HTTP(S) URL."}
 	case strings.Contains(message, "storage verification failed") && (strings.Contains(message, "deadline exceeded") || strings.Contains(message, "timeout") || strings.Contains(message, "no such host") || strings.Contains(message, "connection refused")):
 		return localizedError{"storage_unreachable", "无法在限定时间内连接存储服务。请检查地址、DNS、防火墙和网络访问策略。", "VirSree could not reach the storage service in time. Check the endpoint, DNS, firewall, and network access policy."}
-	case strings.Contains(message, "storage verification failed") && strings.Contains(message, "direct upload probe"):
-		return localizedError{"storage_upload_failed", "直传验证失败。请检查公开上传 Endpoint、桶 CORS、写入权限和 Path-style 设置。", "The direct-upload check failed. Check the public upload endpoint, bucket CORS, write permission, and path-style setting."}
-	case strings.Contains(message, "storage verification failed") && strings.Contains(message, "download probe"):
-		return localizedError{"storage_download_failed", "下载验证失败。请检查下载/CDN Endpoint 是否支持 S3 SigV4，并保留 Host、路径和签名查询参数。", "The download check failed. Ensure the download/CDN endpoint supports S3 SigV4 and preserves the host, path, and signed query parameters."}
 	case strings.Contains(message, "storage verification failed"):
 		return localizedError{"storage_verification_failed", "存储源验证没有通过。请核对连接信息和读、写、复制、删除权限，然后使用追踪编号查看服务器日志。", "Storage verification failed. Check the connection settings and read, write, copy, and delete permissions, then use the trace ID to inspect server logs."}
 	case strings.Contains(message, "oidc") && strings.Contains(message, "not configured"):

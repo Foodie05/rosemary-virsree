@@ -217,9 +217,32 @@ func (s *Server) storageSourceProblem(r *http.Request, operation string, in serv
 		"endpoint_id", endpointFingerprint(in.Endpoint, s.svc.Config.MasterKey),
 		"public_endpoint_id", endpointFingerprint(in.PublicEndpoint, s.svc.Config.MasterKey),
 		"cdn_endpoint_id", endpointFingerprint(in.CDNEndpoint, s.svc.Config.MasterKey),
+		"cdn_mode", safeCDNMode(in.CDNMode),
+		"probe_stage", storageProbeStage(err),
 		"path_style", in.PathStyle,
 	)
 	return problem
+}
+
+func safeCDNMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "s3_sigv4", "bitiful_token":
+		return strings.ToLower(strings.TrimSpace(value))
+	case "":
+		return "none"
+	default:
+		return "invalid"
+	}
+}
+
+func storageProbeStage(err error) string {
+	message := strings.ToLower(err.Error())
+	for _, stage := range []string{"direct/cdn download", "direct upload", "sign download", "sign upload", "copied object", "metadata", "copy", "delete"} {
+		if strings.Contains(message, stage+" probe") {
+			return strings.NewReplacer("/", "_", " ", "_").Replace(stage)
+		}
+	}
+	return "configuration"
 }
 
 func (s *Server) addStorageSource(w http.ResponseWriter, r *http.Request) {

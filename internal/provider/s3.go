@@ -3,6 +3,8 @@ package provider
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,11 +21,12 @@ import (
 const MaxSigV4TTL = 7 * 24 * time.Hour
 
 type S3 struct {
-	bucket   string
-	client   *awss3.Client
-	upload   *awss3.PresignClient
-	download *awss3.PresignClient
-	ready    bool
+	bucket                         string
+	client                         *awss3.Client
+	upload, download               *awss3.PresignClient
+	downloadMode, downloadEndpoint string
+	downloadAuthKey                string
+	ready                          bool
 }
 type Head struct {
 	Size              int64
@@ -43,7 +46,11 @@ func New(c config.Backend) *S3 {
 			}
 		})
 	}
-	return &S3{bucket: c.Bucket, client: makeClient(c.Endpoint), upload: awss3.NewPresignClient(makeClient(c.PublicEndpoint)), download: awss3.NewPresignClient(makeClient(c.DownloadEndpoint)), ready: true}
+	return &S3{
+		bucket: c.Bucket, client: makeClient(c.Endpoint), upload: awss3.NewPresignClient(makeClient(c.PublicEndpoint)),
+		download: awss3.NewPresignClient(makeClient(c.DownloadEndpoint)), downloadMode: c.DownloadMode,
+		downloadEndpoint: c.DownloadEndpoint, downloadAuthKey: c.DownloadAuthKey, ready: true,
+	}
 }
 func (s *S3) Ready() bool  { return s.ready }
 func (s *S3) Kind() string { return "s3" }
@@ -160,6 +167,12 @@ func (s *S3) PresignGet(ctx context.Context, key string, ttl time.Duration, down
 	if !s.ready {
 		return "", fmt.Errorf("S3 backend is not configured")
 	}
+	if s.downloadMode == "bitiful_token" {
+		if ttl < time.Second {
+			return "", fmt.Errorf("expires_in must be at least 1 second")
+		}
+		return s.presignBitiful(key, ttl)
+	}
 	if e := validTTL(ttl); e != nil {
 		return "", e
 	}
@@ -172,6 +185,32 @@ func (s *S3) PresignGet(ctx context.Context, key string, ttl time.Duration, down
 		return "", e
 	}
 	return r.URL, nil
+}
+
+// presignBitiful creates the private CDN URL described by Bitiful's advanced
+// anti-leech protocol. The application-selected TTL is used without a platform
+// default: _ts is exactly now + ttl.
+func (s *S3) presignBitiful(key string, ttl time.Duration) (string, error) {
+	if s.downloadEndpoint == "" || s.downloadAuthKey == "" {
+		return "", fmt.Errorf("Bitiful CDN endpoint and authentication key are required")
+	}
+	u, err := url.Parse(s.downloadEndpoint)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("Bitiful CDN endpoint is invalid")
+	}
+	basePath := strings.TrimRight(u.Path, "/")
+	u.Path = basePath + "/" + strings.TrimLeft(key, "/")
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	deadline := time.Now().Add(ttl).Unix()
+	signedPath := u.EscapedPath()
+	sum := md5.Sum([]byte(s.downloadAuthKey + signedPath + fmt.Sprintf("%d", deadline)))
+	q := u.Query()
+	q.Set("_btf_tk", hex.EncodeToString(sum[:]))
+	q.Set("_ts", fmt.Sprintf("%d", deadline))
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 func (s *S3) Head(ctx context.Context, key string) (Head, error) {
 	if !s.ready {

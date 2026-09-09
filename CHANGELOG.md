@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.7 — 2026-09-09
+
+- Add Bitiful CDN advanced authentication with application-selected `_ts` expiry and server-side `_btf_tk` signing.
+- Separate CDN authentication modes in storage source setup and explain where to find the Bitiful authentication key.
+- Classify download CDN failures before generic network errors and add a redacted probe-stage log field.
+
 ## v0.2.6 — 2026-09-09
 
 - Add a build-time version handshake between the VirSree console and gateway, with automatic cache-busting reloads when a newer server version is detected.
