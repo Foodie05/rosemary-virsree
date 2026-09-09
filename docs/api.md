@@ -33,6 +33,7 @@ The `/s3` routes use AWS Signature Version 4 with the virtual AK/SK. Permissions
 
 | Method | Route | Purpose |
 |---|---|---|
+| `GET` | `/api/v1/version` | Current server build version for client cache reconciliation |
 | `GET` | `/api/v1/overview` | Capacity, bucket, object, key and backend status |
 | `GET` | `/api/v1/setup/status` | OOBE completion and source count |
 | `GET` | `/api/v1/storage-sources` | List redacted S3/WebDAV source metadata |
@@ -51,6 +52,8 @@ The `/s3` routes use AWS Signature Version 4 with the virtual AK/SK. Permissions
 | `DELETE` | `/api/v1/admin/buckets/{bucket}/objects/{key...}` | Delete one object |
 
 An update completes the same full data-plane probe as creation before any persisted or runtime configuration changes. Empty credential fields retain the existing encrypted values. A failed probe leaves the active source untouched. Changing an S3 physical bucket requires `acknowledge_bucket_change: true`; clients should show a clear data-availability warning because VirSree does not move existing objects to the new bucket.
+
+The console embeds its release version at build time and compares it with `/api/v1/version` on startup, once per minute, and whenever the tab regains focus. A mismatch reloads the page through a versioned cache-busting URL. The version endpoint and SPA HTML use `no-store`; fingerprinted `/assets/` files use a one-year immutable cache policy.
 
 Create bucket body:
 

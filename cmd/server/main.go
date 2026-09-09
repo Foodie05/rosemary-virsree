@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"rosemary-virsree/internal/buildinfo"
 	"rosemary-virsree/internal/config"
 	"rosemary-virsree/internal/httpapi"
 	"rosemary-virsree/internal/provider"
@@ -41,7 +42,7 @@ func main() {
 	}
 	server := &http.Server{Addr: cfg.Listen, Handler: httpapi.New(svc).Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
 	go func() {
-		slog.Info("VirSree gateway ready", "listen", cfg.Listen, "public_url", cfg.PublicURL, "backend_ready", cfg.BackendReady())
+		slog.Info("VirSree gateway ready", "listen", cfg.Listen, "public_url", cfg.PublicURL, "backend_ready", cfg.BackendReady(), "version", buildinfo.NormalizedVersion(), "commit", buildinfo.Commit)
 		if e := server.ListenAndServe(); e != nil && e != http.ErrServerClosed {
 			slog.Error("server stopped", "error", e)
 			os.Exit(1)

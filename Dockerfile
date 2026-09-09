@@ -1,17 +1,20 @@
 FROM node:22-alpine AS web
+ARG VIRSREE_VERSION=dev
 WORKDIR /src/web
 COPY web/package.json web/pnpm-lock.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 COPY web/ ./
-RUN pnpm build
+RUN VIRSREE_VERSION="$VIRSREE_VERSION" pnpm build
 
 FROM golang:1.24-alpine AS go
+ARG VIRSREE_VERSION=dev
+ARG VIRSREE_COMMIT=unknown
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /src/web/dist /src/web/dist
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/rosemary-virsree ./cmd/server
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X rosemary-virsree/internal/buildinfo.Version=$VIRSREE_VERSION -X rosemary-virsree/internal/buildinfo.Commit=$VIRSREE_COMMIT" -o /out/rosemary-virsree ./cmd/server
 RUN mkdir -p /out/downloads/rvsctl && \
     for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/arm64 windows/amd64; do \
       os=${target%/*}; arch=${target#*/}; dir=/out/downloads/rvsctl/$os/$arch; name=rvsctl; \

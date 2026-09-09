@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.6 — 2026-09-09
+
+- Add a build-time version handshake between the VirSree console and gateway, with automatic cache-busting reloads when a newer server version is detected.
+- Prevent the SPA entry HTML and version API from being cached while allowing fingerprinted static assets to use a one-year immutable cache policy.
+- Publish matching frontend and backend version metadata in release and Docker builds, and show the active console version in the administrator identity area.
+
 ## v0.2.5 — 2026-09-09
 
 - Add storage-source editing with full data-plane revalidation before an atomic configuration replacement; failed validation leaves the active source unchanged.

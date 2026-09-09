@@ -90,6 +90,8 @@ curl -fsS https://storage.cruty.cn/api/v1/meta
 
 在 OOBE 前，健康接口的 `backend_ready` 为 `false`；第一个来源验证保存后应为 `true`。再确认：OIDC 非白名单邮箱被拒绝、S3 探针经直传/CDN 读回、WebDAV 页面明确显示中转、Apache 只代理 `storage.cruty.cn`，以及 VirSree 只监听 `127.0.0.1:18741`。
 
+管理台和网关的版本应保持一致。`GET /api/v1/version` 返回 Release 构建写入的版本与提交号，且必须保留 VirSree 返回的 `Cache-Control: no-store`。入口 HTML 同样不可缓存；文件名带内容哈希的 `/assets/` 资源可以按 `public, max-age=31536000, immutable` 缓存。管理台发现版本不一致时，会通过带版本号和时间戳的 URL 自动重新载入。
+
 ## 8. 使用追踪编号安全排错
 
 每个 API 错误都包含 `trace_id`，响应头 `X-Request-ID` 也会返回同一个值。无需向用户索取凭据或签名链接，直接查找对应请求：

@@ -12,11 +12,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"rosemary-virsree/internal/buildinfo"
 	"rosemary-virsree/internal/config"
 	"rosemary-virsree/internal/provider"
 	"rosemary-virsree/internal/secretbox"
@@ -242,6 +244,10 @@ func TestAdminAndOneTimeOnboarding(t *testing.T) {
 	if meta.Code != http.StatusOK || decodeMap(t, meta)["gateway_url"] != "https://gateway.test" {
 		t.Fatalf("public metadata: %d %s", meta.Code, meta.Body.String())
 	}
+	version := request(t, h, http.MethodGet, "/api/v1/version", "", nil)
+	if version.Code != http.StatusOK || decodeMap(t, version)["version"] != buildinfo.NormalizedVersion() || !strings.Contains(version.Header().Get("Cache-Control"), "no-store") {
+		t.Fatalf("version metadata or cache policy: %d %s %#v", version.Code, version.Body.String(), version.Header())
+	}
 	if got := request(t, h, http.MethodGet, "/api/v1/overview", "wrong", nil).Code; got != http.StatusUnauthorized {
 		t.Fatalf("unauthorized status = %d", got)
 	}
@@ -276,6 +282,42 @@ func TestAdminAndOneTimeOnboarding(t *testing.T) {
 	values := decodeMap(t, over)
 	if values["bucket_count"] != float64(2) || values["allocated_quota"] != float64(700) {
 		t.Fatalf("unexpected overview: %#v", values)
+	}
+}
+
+func TestConsoleCachePolicyKeepsEntryFreshAndAssetsImmutable(t *testing.T) {
+	webDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(webDir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(webDir, "index.html"), []byte("<!doctype html><title>VirSree</title>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(webDir, "assets", "index-hash.js"), []byte("console.log('VirSree')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	box, _ := secretbox.New("test-master-key")
+	cfg := config.Config{AdminToken: "admin", MasterKey: "test-master-key", PublicURL: "https://gateway.test", WebDir: webDir, TotalQuota: 1000, Backend: config.Backend{Region: "us-east-1"}}
+	svc, err := service.New(db, provider.New(cfg.Backend), box, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(svc).Handler()
+
+	for _, path := range []string{"/", "/console/route?__virsree_version=0.2.6"} {
+		w := request(t, h, http.MethodGet, path, "", nil)
+		if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Cache-Control"), "no-store") || w.Header().Get("Pragma") != "no-cache" {
+			t.Fatalf("entry cache policy for %s: %d %#v", path, w.Code, w.Header())
+		}
+	}
+	asset := request(t, h, http.MethodGet, "/assets/index-hash.js", "", nil)
+	if asset.Code != http.StatusOK || asset.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+		t.Fatalf("asset cache policy: %d %#v", asset.Code, asset.Header())
 	}
 }
 

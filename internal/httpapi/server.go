@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"rosemary-virsree/internal/buildinfo"
 	"rosemary-virsree/internal/s3compat"
 	"rosemary-virsree/internal/secretbox"
 	"rosemary-virsree/internal/service"
@@ -53,10 +54,15 @@ func (s *Server) Handler() http.Handler { return securityHeaders(s.log(s.mux)) }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		write(w, 200, map[string]any{"status": "ok", "backend_ready": s.svc.Storage.Ready()})
+		noStore(w)
+		write(w, 200, map[string]any{"status": "ok", "backend_ready": s.svc.Storage.Ready(), "version": buildinfo.NormalizedVersion()})
+	})
+	s.mux.HandleFunc("GET /api/v1/version", func(w http.ResponseWriter, r *http.Request) {
+		noStore(w)
+		write(w, 200, map[string]any{"version": buildinfo.NormalizedVersion(), "commit": buildinfo.Commit})
 	})
 	s.mux.HandleFunc("GET /api/v1/meta", func(w http.ResponseWriter, r *http.Request) {
-		write(w, 200, map[string]any{"gateway_url": s.svc.Config.PublicURL, "project_url": s.svc.Config.ProjectURL, "release_url": s.svc.Config.ReleaseURL, "docs_url": s.svc.Config.PublicURL + "/docs/integration.md"})
+		write(w, 200, map[string]any{"gateway_url": s.svc.Config.PublicURL, "project_url": s.svc.Config.ProjectURL, "release_url": s.svc.Config.ReleaseURL, "docs_url": s.svc.Config.PublicURL + "/docs/integration.md", "version": buildinfo.NormalizedVersion(), "commit": buildinfo.Commit})
 	})
 	s.mux.HandleFunc("GET /api/v1/session", s.session)
 	s.mux.HandleFunc("GET /auth/login", s.oidcLogin)
@@ -100,14 +106,27 @@ func (s *Server) routes() {
 	if st, e := os.Stat(s.svc.Config.WebDir); e == nil && st.IsDir() {
 		fs := http.FileServer(http.Dir(s.svc.Config.WebDir))
 		s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-			p := filepath.Join(s.svc.Config.WebDir, filepath.Clean(r.URL.Path))
+			cleanPath := filepath.Clean("/" + r.URL.Path)
+			p := filepath.Join(s.svc.Config.WebDir, strings.TrimPrefix(cleanPath, "/"))
 			if info, e := os.Stat(p); e == nil && !info.IsDir() {
+				if strings.HasPrefix(cleanPath, "/assets/") {
+					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				} else {
+					w.Header().Set("Cache-Control", "no-cache")
+				}
 				fs.ServeHTTP(w, r)
 				return
 			}
+			noStore(w)
 			http.ServeFile(w, r, filepath.Join(s.svc.Config.WebDir, "index.html"))
 		})
 	}
+}
+
+func noStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 }
 func (s *Server) downloadChecksums(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filepath.Join(s.svc.Config.DownloadDir, "rvsctl", "SHA256SUMS"))
