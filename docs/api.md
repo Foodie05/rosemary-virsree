@@ -37,6 +37,8 @@ The `/s3` routes use AWS Signature Version 4 with the virtual AK/SK. Permissions
 | `GET` | `/api/v1/setup/status` | OOBE completion and source count |
 | `GET` | `/api/v1/storage-sources` | List redacted S3/WebDAV source metadata |
 | `POST` | `/api/v1/storage-sources` | Verify and add an encrypted storage source |
+| `GET` | `/api/v1/storage-sources/{id}` | Read editable connection settings without credential values |
+| `PUT` | `/api/v1/storage-sources/{id}` | Revalidate and atomically replace a storage source |
 | `GET` | `/api/v1/buckets` | List virtual buckets and usage |
 | `POST` | `/api/v1/buckets` | Create a virtual bucket and one-time owner credential |
 | `GET` | `/api/v1/access-keys` | List key metadata without secrets |
@@ -47,6 +49,8 @@ The `/s3` routes use AWS Signature Version 4 with the virtual AK/SK. Permissions
 | `POST` | `/api/v1/admin/buckets/{bucket}/objects/download` | Create an admin-selected direct download URL |
 | `POST` | `/api/v1/admin/buckets/{bucket}/objects/invalidate-links` | Rotate one physical key |
 | `DELETE` | `/api/v1/admin/buckets/{bucket}/objects/{key...}` | Delete one object |
+
+An update completes the same full data-plane probe as creation before any persisted or runtime configuration changes. Empty credential fields retain the existing encrypted values. A failed probe leaves the active source untouched. Changing an S3 physical bucket requires `acknowledge_bucket_change: true`; clients should show a clear data-availability warning because VirSree does not move existing objects to the new bucket.
 
 Create bucket body:
 

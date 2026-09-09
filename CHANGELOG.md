@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.5 — 2026-09-09
+
+- Add storage-source editing with full data-plane revalidation before an atomic configuration replacement; failed validation leaves the active source unchanged.
+- Preserve encrypted credentials when edit fields are left blank, and prevent capacity from being reduced below used plus reserved space.
+- Require an explicit acknowledgement when the physical S3 bucket changes, with a custom VirSree risk dialog that explains object migration and availability impact.
+- Add redacted edit audit and rejection logs without exposing endpoints, bucket names, credentials, or provider error payloads.
+
 ## v0.2.4 — 2026-09-08
 
 - Normalize bucket-scoped S3 hosts such as `bucket.s3.example.com` back to the SDK service endpoint so the bucket is not duplicated in the object path.

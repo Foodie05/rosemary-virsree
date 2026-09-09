@@ -65,6 +65,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/setup/status", s.admin(s.setupStatus))
 	s.mux.HandleFunc("GET /api/v1/storage-sources", s.admin(s.storageSources))
 	s.mux.HandleFunc("POST /api/v1/storage-sources", s.admin(s.addStorageSource))
+	s.mux.HandleFunc("GET /api/v1/storage-sources/{id}", s.admin(s.storageSource))
+	s.mux.HandleFunc("PUT /api/v1/storage-sources/{id}", s.admin(s.updateStorageSource))
 	s.mux.HandleFunc("GET /api/v1/overview", s.admin(s.overview))
 	s.mux.HandleFunc("GET /api/v1/buckets", s.admin(s.buckets))
 	s.mux.HandleFunc("GET /api/v1/access-keys", s.admin(s.keys))

@@ -190,6 +190,38 @@ func (s *Server) storageSources(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, sources)
 }
 
+func (s *Server) storageSource(w http.ResponseWriter, r *http.Request) {
+	source, err := s.svc.Storage.Detail(r.Context(), r.PathValue("id"))
+	if err != nil {
+		fail(w, r, http.StatusNotFound, err.Error())
+		return
+	}
+	write(w, http.StatusOK, source)
+}
+
+func (s *Server) storageSourceProblem(r *http.Request, operation string, in service.StorageSourceInput, err error) localizedError {
+	problem := errorFor(err.Error(), http.StatusBadRequest)
+	kind := strings.ToLower(strings.TrimSpace(in.Kind))
+	if kind != "s3" && kind != "webdav" {
+		kind = "invalid"
+	}
+	if problem.Code == "storage_probe_not_found" && in.PathStyle {
+		problem.ZH += " 本次请求开启了 Path-style；公有云 S3 兼容服务通常需要关闭后重试。"
+		problem.EN += " Path-style was enabled for this attempt; public S3-compatible services commonly require it to be disabled."
+	}
+	slog.Warn("storage source rejected",
+		"request_id", requestID(r),
+		"operation", operation,
+		"error_code", problem.Code,
+		"storage_kind", kind,
+		"endpoint_id", endpointFingerprint(in.Endpoint, s.svc.Config.MasterKey),
+		"public_endpoint_id", endpointFingerprint(in.PublicEndpoint, s.svc.Config.MasterKey),
+		"cdn_endpoint_id", endpointFingerprint(in.CDNEndpoint, s.svc.Config.MasterKey),
+		"path_style", in.PathStyle,
+	)
+	return problem
+}
+
 func (s *Server) addStorageSource(w http.ResponseWriter, r *http.Request) {
 	var in service.StorageSourceInput
 	if err := decode(r, &in); err != nil {
@@ -198,29 +230,32 @@ func (s *Server) addStorageSource(w http.ResponseWriter, r *http.Request) {
 	}
 	source, err := s.svc.Storage.Add(r.Context(), in)
 	if err != nil {
-		problem := errorFor(err.Error(), http.StatusBadRequest)
-		kind := strings.ToLower(strings.TrimSpace(in.Kind))
-		if kind != "s3" && kind != "webdav" {
-			kind = "invalid"
-		}
-		if problem.Code == "storage_probe_not_found" && in.PathStyle {
-			problem.ZH += " 本次请求开启了 Path-style；公有云 S3 兼容服务通常需要关闭后重试。"
-			problem.EN += " Path-style was enabled for this attempt; public S3-compatible services commonly require it to be disabled."
-		}
-		slog.Warn("storage source rejected",
-			"request_id", requestID(r),
-			"error_code", problem.Code,
-			"storage_kind", kind,
-			"endpoint_id", endpointFingerprint(in.Endpoint, s.svc.Config.MasterKey),
-			"public_endpoint_id", endpointFingerprint(in.PublicEndpoint, s.svc.Config.MasterKey),
-			"cdn_endpoint_id", endpointFingerprint(in.CDNEndpoint, s.svc.Config.MasterKey),
-			"path_style", in.PathStyle,
-		)
-		failProblem(w, r, 400, problem)
+		failProblem(w, r, 400, s.storageSourceProblem(r, "create", in, err))
 		return
 	}
 	s.svc.DB.Audit(r.Context(), "storage-source.created", source.ID, source.Kind)
 	write(w, http.StatusCreated, map[string]any{"source": source, "verified": true})
+}
+
+func (s *Server) updateStorageSource(w http.ResponseWriter, r *http.Request) {
+	var in service.StorageSourceInput
+	if err := decode(r, &in); err != nil {
+		fail(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	source, bucketChanged, err := s.svc.Storage.Update(r.Context(), r.PathValue("id"), in)
+	if err != nil {
+		problem := s.storageSourceProblem(r, "update", in, err)
+		status := http.StatusBadRequest
+		if problem.Code == "resource_not_found" {
+			status = http.StatusNotFound
+		}
+		failProblem(w, r, status, problem)
+		return
+	}
+	detail := fmt.Sprintf("%s bucket_changed=%t", source.Kind, bucketChanged)
+	s.svc.DB.Audit(r.Context(), "storage-source.updated", source.ID, detail)
+	write(w, http.StatusOK, map[string]any{"source": source, "verified": true, "bucket_changed": bucketChanged})
 }
 
 func (s *Server) transferUpload(w http.ResponseWriter, r *http.Request) {

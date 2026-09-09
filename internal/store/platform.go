@@ -34,6 +34,24 @@ func (s *Store) GetStorageSource(ctx context.Context, id string) (model.StorageS
 	e := s.db.QueryRowContext(ctx, `SELECT id,name,kind,priority,capacity_bytes,used_bytes,reserved_bytes,enabled,direct_transfer,cdn_enabled,config_cipher,created_at FROM storage_sources WHERE id=?`, id).Scan(&v.ID, &v.Name, &v.Kind, &v.Priority, &v.CapacityBytes, &v.UsedBytes, &v.ReservedBytes, &v.Enabled, &v.Direct, &v.CDNEnabled, &v.ConfigCipher, &v.CreatedAt)
 	return v, e
 }
+func (s *Store) UpdateStorageSource(ctx context.Context, v model.StorageSource) error {
+	tx, e := s.db.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	var used, reserved int64
+	if e = tx.QueryRowContext(ctx, "SELECT used_bytes,reserved_bytes FROM storage_sources WHERE id=?", v.ID).Scan(&used, &reserved); e != nil {
+		return e
+	}
+	if v.CapacityBytes < used+reserved {
+		return errors.New("storage source capacity cannot be lower than its used and reserved bytes")
+	}
+	if _, e = tx.ExecContext(ctx, `UPDATE storage_sources SET name=?,kind=?,priority=?,capacity_bytes=?,enabled=?,direct_transfer=?,cdn_enabled=?,config_cipher=? WHERE id=?`, v.Name, v.Kind, v.Priority, v.CapacityBytes, v.Enabled, v.Direct, v.CDNEnabled, v.ConfigCipher, v.ID); e != nil {
+		return e
+	}
+	return tx.Commit()
+}
 func (s *Store) StorageConfigured(ctx context.Context) bool {
 	var n int
 	_ = s.db.QueryRowContext(ctx, "SELECT count(*) FROM storage_sources WHERE enabled=1").Scan(&n)

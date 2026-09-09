@@ -18,6 +18,12 @@ type localizedError struct {
 func errorFor(raw string, status int) localizedError {
 	message := strings.ToLower(raw)
 	switch {
+	case strings.Contains(message, "bucket change requires acknowledge_bucket_change"):
+		return localizedError{"storage_bucket_change_unacknowledged", "更换真实存储桶前必须确认数据可用性风险。请检查迁移计划并明确提交风险确认。", "Changing the physical bucket requires an explicit data-availability risk acknowledgement. Review the migration plan and submit the acknowledgement."}
+	case strings.Contains(message, "storage source kind cannot be changed"):
+		return localizedError{"storage_kind_immutable", "存储源类型创建后不能更改。请添加一个新的存储源。", "A storage source type cannot be changed after creation. Add a new storage source instead."}
+	case strings.Contains(message, "storage source capacity cannot be lower"):
+		return localizedError{"storage_capacity_too_small", "容量不能低于该存储源已使用和已预留空间的总和。", "Capacity cannot be lower than the source's combined used and reserved space."}
 	case strings.Contains(message, "storage verification failed") && (strings.Contains(message, "statuscode: 404") || strings.Contains(message, "notfound") || strings.Contains(message, "404 not found")):
 		return localizedError{"storage_probe_not_found", "VirSree 已连接到存储服务，但找不到刚上传的验证对象。请检查桶名、Endpoint 和 Path-style 设置是否匹配。", "VirSree reached the storage service but could not find the verification object it just uploaded. Check the bucket name, endpoint, and path-style setting."}
 	case strings.Contains(message, "storage verification failed") && (strings.Contains(message, "accessdenied") || strings.Contains(message, "statuscode: 403") || strings.Contains(message, "signaturedoesnotmatch") || strings.Contains(message, "invalidaccesskeyid")):

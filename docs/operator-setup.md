@@ -73,9 +73,13 @@ WebDAV 需要 Endpoint、用户名和密码或 App Password。标准 WebDAV 没�
 GET  /api/v1/setup/status
 GET  /api/v1/storage-sources
 POST /api/v1/storage-sources
+GET  /api/v1/storage-sources/{id}
+PUT  /api/v1/storage-sources/{id}
 ```
 
-`POST` 会同步完成连接与数据面验证，成功时返回 `verified: true`。请勿把真实存储凭据写入日志、工单或源码。
+`POST` 和 `PUT` 都会同步完成连接与完整数据面验证，成功时返回 `verified: true`。编辑时凭据字段留空会继续使用原先加密保存的凭据；只有验证成功后才会一次性替换配置，失败时现有来源继续运行。
+
+更换 S3 的真实桶可能让尚未迁移的现有对象无法下载、删除或轮换链接。管理台会使用统一的 VirSree 风险弹窗说明影响，确认后才提交 `acknowledge_bucket_change: true`；API 客户端也必须显式提交该字段。VirSree 不会自动迁移对象。请勿把真实存储凭据写入日志、工单或源码。
 
 ## 7. 上线检查
 

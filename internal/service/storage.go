@@ -20,20 +20,34 @@ import (
 )
 
 type StorageSourceInput struct {
-	Name           string `json:"name"`
-	Kind           string `json:"kind"`
-	Priority       int    `json:"priority"`
-	CapacityBytes  int64  `json:"capacity_bytes"`
-	Endpoint       string `json:"endpoint"`
-	PublicEndpoint string `json:"public_endpoint"`
-	Region         string `json:"region"`
-	Bucket         string `json:"bucket"`
-	AccessKey      string `json:"access_key"`
-	SecretKey      string `json:"secret_key"`
-	PathStyle      bool   `json:"path_style"`
-	CDNEndpoint    string `json:"cdn_endpoint"`
-	WebDAVUsername string `json:"webdav_username"`
-	WebDAVPassword string `json:"webdav_password"`
+	Name                    string `json:"name"`
+	Kind                    string `json:"kind"`
+	Priority                int    `json:"priority"`
+	CapacityBytes           int64  `json:"capacity_bytes"`
+	Endpoint                string `json:"endpoint"`
+	PublicEndpoint          string `json:"public_endpoint"`
+	Region                  string `json:"region"`
+	Bucket                  string `json:"bucket"`
+	AccessKey               string `json:"access_key"`
+	SecretKey               string `json:"secret_key"`
+	PathStyle               bool   `json:"path_style"`
+	CDNEndpoint             string `json:"cdn_endpoint"`
+	WebDAVUsername          string `json:"webdav_username"`
+	WebDAVPassword          string `json:"webdav_password"`
+	AcknowledgeBucketChange bool   `json:"acknowledge_bucket_change"`
+}
+type StorageSourceDetail struct {
+	model.StorageSource
+	Endpoint                 string `json:"endpoint"`
+	PublicEndpoint           string `json:"public_endpoint"`
+	Region                   string `json:"region"`
+	Bucket                   string `json:"bucket"`
+	CDNEndpoint              string `json:"cdn_endpoint"`
+	PathStyle                bool   `json:"path_style"`
+	AccessKeyConfigured      bool   `json:"access_key_configured"`
+	SecretKeyConfigured      bool   `json:"secret_key_configured"`
+	WebDAVUsernameConfigured bool   `json:"webdav_username_configured"`
+	WebDAVPasswordConfigured bool   `json:"webdav_password_configured"`
 }
 type storedSourceConfig struct {
 	Endpoint, PublicEndpoint, Region, Bucket, AccessKey, SecretKey string
@@ -96,45 +110,72 @@ func backendFor(kind string, c storedSourceConfig) (provider.Backend, error) {
 		return nil, errors.New("storage kind must be s3 or webdav")
 	}
 }
-func (m *StorageManager) Add(ctx context.Context, in StorageSourceInput) (model.StorageSource, error) {
+func (m *StorageManager) prepare(ctx context.Context, in StorageSourceInput, existing *storedSourceConfig) (StorageSourceInput, storedSourceConfig, provider.Backend, error) {
 	in.Name = strings.TrimSpace(in.Name)
 	in.Kind = strings.ToLower(strings.TrimSpace(in.Kind))
 	in.Bucket = strings.TrimSpace(in.Bucket)
+	in.Region = strings.TrimSpace(in.Region)
+	if existing != nil {
+		if in.AccessKey == "" {
+			in.AccessKey = existing.AccessKey
+		}
+		if in.SecretKey == "" {
+			in.SecretKey = existing.SecretKey
+		}
+		if in.WebDAVUsername == "" {
+			in.WebDAVUsername = existing.Username
+		}
+		if in.WebDAVPassword == "" {
+			in.WebDAVPassword = existing.Password
+		}
+	}
 	var e error
 	if in.Endpoint, e = normalizeEndpoint(in.Endpoint, in.Kind == "s3"); e != nil {
-		return model.StorageSource{}, e
+		return in, storedSourceConfig{}, nil, e
 	}
 	if in.PublicEndpoint, e = normalizeEndpoint(in.PublicEndpoint, true); e != nil {
-		return model.StorageSource{}, fmt.Errorf("public endpoint: %w", e)
+		return in, storedSourceConfig{}, nil, fmt.Errorf("public endpoint: %w", e)
 	}
 	if in.CDNEndpoint, e = normalizeEndpoint(in.CDNEndpoint, true); e != nil {
-		return model.StorageSource{}, fmt.Errorf("CDN endpoint: %w", e)
+		return in, storedSourceConfig{}, nil, fmt.Errorf("CDN endpoint: %w", e)
 	}
 	if in.Kind == "s3" {
 		in.Endpoint = normalizeS3ServiceEndpoint(in.Endpoint, in.Bucket)
 		in.PublicEndpoint = normalizeS3ServiceEndpoint(in.PublicEndpoint, in.Bucket)
 	}
 	if in.Name == "" || in.CapacityBytes <= 0 {
-		return model.StorageSource{}, errors.New("name and positive capacity_bytes are required")
+		return in, storedSourceConfig{}, nil, errors.New("name and positive capacity_bytes are required")
 	}
 	if in.Kind == "s3" && (in.Region == "" || in.Bucket == "" || in.AccessKey == "" || in.SecretKey == "") {
-		return model.StorageSource{}, errors.New("region, bucket, access_key and secret_key are required for S3")
+		return in, storedSourceConfig{}, nil, errors.New("region, bucket, access_key and secret_key are required for S3")
 	}
 	if in.Kind == "webdav" && (in.Endpoint == "" || in.WebDAVUsername == "" || in.WebDAVPassword == "") {
-		return model.StorageSource{}, errors.New("endpoint, webdav_username and webdav_password are required for WebDAV")
+		return in, storedSourceConfig{}, nil, errors.New("endpoint, webdav_username and webdav_password are required for WebDAV")
 	}
 	c := storedSourceConfig{Endpoint: in.Endpoint, PublicEndpoint: in.PublicEndpoint, Region: in.Region, Bucket: in.Bucket, AccessKey: in.AccessKey, SecretKey: in.SecretKey, PathStyle: in.PathStyle, CDNEndpoint: in.CDNEndpoint, Username: in.WebDAVUsername, Password: in.WebDAVPassword}
 	b, e := backendFor(in.Kind, c)
 	if e != nil {
-		return model.StorageSource{}, e
+		return in, c, nil, e
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	if e = b.Probe(probeCtx); e != nil {
-		return model.StorageSource{}, fmt.Errorf("storage verification failed: %w", e)
+		return in, c, nil, fmt.Errorf("storage verification failed: %w", e)
 	}
+	return in, c, b, nil
+}
+
+func (m *StorageManager) sealConfig(c storedSourceConfig) (string, error) {
 	raw, _ := json.Marshal(c)
-	cipher, e := m.box.Seal(string(raw))
+	return m.box.Seal(string(raw))
+}
+
+func (m *StorageManager) Add(ctx context.Context, in StorageSourceInput) (model.StorageSource, error) {
+	in, c, b, e := m.prepare(ctx, in, nil)
+	if e != nil {
+		return model.StorageSource{}, e
+	}
+	cipher, e := m.sealConfig(c)
 	if e != nil {
 		return model.StorageSource{}, e
 	}
@@ -146,6 +187,68 @@ func (m *StorageManager) Add(ctx context.Context, in StorageSourceInput) (model.
 	m.sources[v.ID] = sourceRuntime{v, b}
 	m.mu.Unlock()
 	return v, nil
+}
+
+func (m *StorageManager) Detail(ctx context.Context, id string) (StorageSourceDetail, error) {
+	v, e := m.db.GetStorageSource(ctx, id)
+	if e != nil {
+		return StorageSourceDetail{}, e
+	}
+	plain, e := m.box.Open(v.ConfigCipher)
+	if e != nil {
+		return StorageSourceDetail{}, e
+	}
+	var c storedSourceConfig
+	if e = json.Unmarshal([]byte(plain), &c); e != nil {
+		return StorageSourceDetail{}, e
+	}
+	return StorageSourceDetail{
+		StorageSource: v, Endpoint: c.Endpoint, PublicEndpoint: c.PublicEndpoint,
+		Region: c.Region, Bucket: c.Bucket, CDNEndpoint: c.CDNEndpoint, PathStyle: c.PathStyle,
+		AccessKeyConfigured: c.AccessKey != "", SecretKeyConfigured: c.SecretKey != "",
+		WebDAVUsernameConfigured: c.Username != "", WebDAVPasswordConfigured: c.Password != "",
+	}, nil
+}
+
+func (m *StorageManager) Update(ctx context.Context, id string, in StorageSourceInput) (model.StorageSource, bool, error) {
+	current, e := m.db.GetStorageSource(ctx, id)
+	if e != nil {
+		return model.StorageSource{}, false, e
+	}
+	if in.Kind != "" && !strings.EqualFold(strings.TrimSpace(in.Kind), current.Kind) {
+		return current, false, errors.New("storage source kind cannot be changed")
+	}
+	plain, e := m.box.Open(current.ConfigCipher)
+	if e != nil {
+		return current, false, e
+	}
+	var old storedSourceConfig
+	if e = json.Unmarshal([]byte(plain), &old); e != nil {
+		return current, false, e
+	}
+	in.Kind = current.Kind
+	bucketChanged := current.Kind == "s3" && strings.TrimSpace(in.Bucket) != old.Bucket
+	if bucketChanged && !in.AcknowledgeBucketChange {
+		return current, true, errors.New("bucket change requires acknowledge_bucket_change")
+	}
+	in, c, b, e := m.prepare(ctx, in, &old)
+	if e != nil {
+		return current, bucketChanged, e
+	}
+	cipher, e := m.sealConfig(c)
+	if e != nil {
+		return current, bucketChanged, e
+	}
+	updated := current
+	updated.Name, updated.Kind, updated.Priority, updated.CapacityBytes = in.Name, in.Kind, in.Priority, in.CapacityBytes
+	updated.Enabled, updated.Direct, updated.CDNEnabled, updated.ConfigCipher = true, in.Kind == "s3", in.CDNEndpoint != "", cipher
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e = m.db.UpdateStorageSource(ctx, updated); e != nil {
+		return current, bucketChanged, e
+	}
+	m.sources[id] = sourceRuntime{meta: updated, backend: b}
+	return updated, bucketChanged, nil
 }
 
 // normalizeS3ServiceEndpoint repairs a common console-copy mistake. S3 SDK base
