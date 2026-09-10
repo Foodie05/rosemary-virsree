@@ -18,6 +18,8 @@ type Config struct {
 	SessionTTL                                                  int64
 	TotalQuota                                                  int64
 	MaxObjectsPerBucket, MaxPendingUploads                      int64
+	BackupInterval                                              int64
+	BackupRetention                                             int
 	Backend                                                     Backend
 }
 
@@ -39,6 +41,7 @@ func Load() (Config, error) {
 		OIDCRedirectURL: env("RVS_OIDC_REDIRECT_URL", ""), AdminEmails: splitCSV(os.Getenv("RVS_ADMIN_EMAILS")),
 		SessionTTL: envInt("RVS_SESSION_TTL_SECONDS", 12*60*60),
 		TotalQuota: envInt("RVS_TOTAL_QUOTA", 100<<30), MaxObjectsPerBucket: envInt("RVS_MAX_OBJECTS_PER_BUCKET", 1_000_000), MaxPendingUploads: envInt("RVS_MAX_PENDING_UPLOADS_PER_BUCKET", 1_000),
+		BackupInterval: envInt("RVS_BACKUP_INTERVAL_SECONDS", 6*60*60), BackupRetention: int(envInt("RVS_BACKUP_RETENTION", 7)),
 		Backend: Backend{Endpoint: os.Getenv("RVS_S3_ENDPOINT"), PublicEndpoint: os.Getenv("RVS_S3_PUBLIC_ENDPOINT"),
 			DownloadEndpoint: os.Getenv("RVS_S3_DOWNLOAD_ENDPOINT"),
 			Region:           env("RVS_S3_REGION", "us-east-1"), Bucket: os.Getenv("RVS_S3_BUCKET"), AccessKey: os.Getenv("RVS_S3_ACCESS_KEY"),
@@ -55,6 +58,9 @@ func Load() (Config, error) {
 	}
 	if c.SessionTTL < 300 {
 		return c, fmt.Errorf("RVS_SESSION_TTL_SECONDS must be at least 300")
+	}
+	if c.BackupInterval < 60 || c.BackupRetention < 2 || c.BackupRetention > 30 {
+		return c, fmt.Errorf("backup interval must be at least 60 seconds and retention must be between 2 and 30")
 	}
 	c.PublicURL = strings.TrimRight(c.PublicURL, "/")
 	configuredOIDC := c.OIDCClientID != "" || c.OIDCClientSecret != "" || len(c.AdminEmails) > 0

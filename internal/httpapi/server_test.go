@@ -170,6 +170,30 @@ func decodeMap(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 	return out
 }
 
+func TestAdminCanInspectAndResizeExistingBucket(t *testing.T) {
+	h := testServer(t)
+	created := request(t, h, http.MethodPost, "/api/v1/buckets", "admin", map[string]any{"name": "Media", "slug": "media-bucket", "visibility": "private", "quota_bytes": 100})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	updated := request(t, h, http.MethodPut, "/api/v1/admin/buckets/media-bucket", "admin", map[string]any{"name": "Media archive", "visibility": "public", "quota_bytes": 250})
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	detail := request(t, h, http.MethodGet, "/api/v1/admin/buckets/media-bucket", "admin", nil)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	got := decodeMap(t, detail)
+	bucket := got["bucket"].(map[string]any)
+	if bucket["name"] != "Media archive" || bucket["visibility"] != "public" || bucket["quota_bytes"] != float64(250) {
+		t.Fatalf("unexpected detail: %#v", got)
+	}
+	if got["s3_endpoint"] != "https://gateway.test/s3" || got["status"] != "storage_unavailable" {
+		t.Fatalf("missing management information: %#v", got)
+	}
+}
+
 func TestErrorsFollowRequestLanguageAndIncludeTraceID(t *testing.T) {
 	h := testServer(t)
 	for _, tc := range []struct {

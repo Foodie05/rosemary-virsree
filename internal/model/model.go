@@ -3,14 +3,15 @@ package model
 import "time"
 
 type Bucket struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	Slug          string    `json:"slug"`
-	Visibility    string    `json:"visibility"`
-	QuotaBytes    int64     `json:"quota_bytes"`
-	UsedBytes     int64     `json:"used_bytes"`
-	ReservedBytes int64     `json:"reserved_bytes"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Slug           string    `json:"slug"`
+	Visibility     string    `json:"visibility"`
+	QuotaBytes     int64     `json:"quota_bytes"`
+	QuotaUnlimited bool      `json:"quota_unlimited"`
+	UsedBytes      int64     `json:"used_bytes"`
+	ReservedBytes  int64     `json:"reserved_bytes"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type AccessKey struct {
@@ -42,18 +43,19 @@ type Object struct {
 }
 
 type StorageSource struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	Kind          string    `json:"kind"`
-	Priority      int       `json:"priority"`
-	CapacityBytes int64     `json:"capacity_bytes"`
-	UsedBytes     int64     `json:"used_bytes"`
-	ReservedBytes int64     `json:"reserved_bytes"`
-	Enabled       bool      `json:"enabled"`
-	Direct        bool      `json:"direct_transfer"`
-	CDNEnabled    bool      `json:"cdn_enabled"`
-	ConfigCipher  string    `json:"-"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID                string    `json:"id"`
+	Name              string    `json:"name"`
+	Kind              string    `json:"kind"`
+	Priority          int       `json:"priority"`
+	CapacityBytes     int64     `json:"capacity_bytes"`
+	CapacityUnlimited bool      `json:"capacity_unlimited"`
+	UsedBytes         int64     `json:"used_bytes"`
+	ReservedBytes     int64     `json:"reserved_bytes"`
+	Enabled           bool      `json:"enabled"`
+	Direct            bool      `json:"direct_transfer"`
+	CDNEnabled        bool      `json:"cdn_enabled"`
+	ConfigCipher      string    `json:"-"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 type BootstrapToken struct {

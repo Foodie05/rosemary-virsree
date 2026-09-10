@@ -13,14 +13,17 @@ import (
 	"rosemary-virsree/internal/model"
 )
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db   *sql.DB
+	path string
+}
 
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	if err = s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -36,9 +39,9 @@ func Open(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) migrate() error {
 	_, err := s.db.Exec(`
-CREATE TABLE IF NOT EXISTS buckets(id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT NOT NULL UNIQUE,visibility TEXT NOT NULL DEFAULT 'private',quota_bytes INTEGER NOT NULL,used_bytes INTEGER NOT NULL DEFAULT 0,reserved_bytes INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL);
+CREATE TABLE IF NOT EXISTS buckets(id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT NOT NULL UNIQUE,visibility TEXT NOT NULL DEFAULT 'private',quota_bytes INTEGER NOT NULL,quota_unlimited INTEGER NOT NULL DEFAULT 0,used_bytes INTEGER NOT NULL DEFAULT 0,reserved_bytes INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL);
 CREATE TABLE IF NOT EXISTS access_keys(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,name TEXT NOT NULL,ak TEXT NOT NULL UNIQUE,secret_cipher TEXT NOT NULL,permissions TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL,last_used_at DATETIME,FOREIGN KEY(bucket_id) REFERENCES buckets(id));
-CREATE TABLE IF NOT EXISTS storage_sources(id TEXT PRIMARY KEY,name TEXT NOT NULL,kind TEXT NOT NULL,priority INTEGER NOT NULL,capacity_bytes INTEGER NOT NULL,used_bytes INTEGER NOT NULL DEFAULT 0,reserved_bytes INTEGER NOT NULL DEFAULT 0,enabled INTEGER NOT NULL DEFAULT 1,direct_transfer INTEGER NOT NULL DEFAULT 1,cdn_enabled INTEGER NOT NULL DEFAULT 0,config_cipher TEXT NOT NULL,created_at DATETIME NOT NULL);
+CREATE TABLE IF NOT EXISTS storage_sources(id TEXT PRIMARY KEY,name TEXT NOT NULL,kind TEXT NOT NULL,priority INTEGER NOT NULL,capacity_bytes INTEGER NOT NULL,capacity_unlimited INTEGER NOT NULL DEFAULT 0,used_bytes INTEGER NOT NULL DEFAULT 0,reserved_bytes INTEGER NOT NULL DEFAULT 0,enabled INTEGER NOT NULL DEFAULT 1,direct_transfer INTEGER NOT NULL DEFAULT 1,cdn_enabled INTEGER NOT NULL DEFAULT 0,config_cipher TEXT NOT NULL,created_at DATETIME NOT NULL);
 CREATE TABLE IF NOT EXISTS objects(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,source_id TEXT NOT NULL DEFAULT '',logical_key TEXT NOT NULL,physical_key TEXT NOT NULL UNIQUE,size INTEGER NOT NULL,content_type TEXT,etag TEXT,status TEXT NOT NULL,generation INTEGER NOT NULL DEFAULT 1,is_public INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL,updated_at DATETIME NOT NULL,UNIQUE(bucket_id,logical_key),FOREIGN KEY(bucket_id) REFERENCES buckets(id));
 CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,source_id TEXT NOT NULL DEFAULT '',logical_key TEXT NOT NULL,physical_key TEXT NOT NULL UNIQUE,size INTEGER NOT NULL,content_type TEXT,reserved_bytes INTEGER NOT NULL,source_reserved_bytes INTEGER NOT NULL DEFAULT 0,transfer_hash TEXT NOT NULL DEFAULT '',expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL,UNIQUE(bucket_id,logical_key),FOREIGN KEY(bucket_id) REFERENCES buckets(id));
 CREATE TABLE IF NOT EXISTS bootstrap_tokens(id TEXT PRIMARY KEY,name TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,max_quota INTEGER NOT NULL,expires_at DATETIME NOT NULL,used_at DATETIME,created_at DATETIME NOT NULL);
@@ -65,6 +68,8 @@ CREATE INDEX IF NOT EXISTS sources_priority ON storage_sources(enabled,priority)
 		"ALTER TABLE transfer_tokens ADD COLUMN size INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE transfer_tokens ADD COLUMN content_type TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE transfer_tokens ADD COLUMN etag TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE buckets ADD COLUMN quota_unlimited INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE storage_sources ADD COLUMN capacity_unlimited INTEGER NOT NULL DEFAULT 0",
 	} {
 		if _, e := s.db.Exec(q); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
 			return e
@@ -79,11 +84,11 @@ func (s *Store) Audit(ctx context.Context, action, subject, detail string) {
 func (s *Store) Overview(ctx context.Context) (map[string]any, error) {
 	var buckets, objects, keys int
 	var used, reserved, quota int64
-	err := s.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM buckets),(SELECT count(*) FROM objects WHERE status='ready'),(SELECT count(*) FROM access_keys WHERE revoked=0),COALESCE((SELECT sum(used_bytes) FROM buckets),0),COALESCE((SELECT sum(reserved_bytes) FROM buckets),0),COALESCE((SELECT sum(quota_bytes) FROM buckets),0)`).Scan(&buckets, &objects, &keys, &used, &reserved, &quota)
+	err := s.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM buckets),(SELECT count(*) FROM objects WHERE status='ready'),(SELECT count(*) FROM access_keys WHERE revoked=0),COALESCE((SELECT sum(used_bytes) FROM buckets),0),COALESCE((SELECT sum(reserved_bytes) FROM buckets),0),COALESCE((SELECT sum(quota_bytes) FROM buckets WHERE quota_unlimited=0),0)`).Scan(&buckets, &objects, &keys, &used, &reserved, &quota)
 	return map[string]any{"bucket_count": buckets, "object_count": objects, "active_key_count": keys, "used_bytes": used, "reserved_bytes": reserved, "allocated_quota": quota}, err
 }
 func (s *Store) ListBuckets(ctx context.Context) ([]model.Bucket, error) {
-	rows, e := s.db.QueryContext(ctx, "SELECT id,name,slug,visibility,quota_bytes,used_bytes,reserved_bytes,created_at FROM buckets ORDER BY created_at DESC")
+	rows, e := s.db.QueryContext(ctx, "SELECT id,name,slug,visibility,quota_bytes,quota_unlimited,used_bytes,reserved_bytes,created_at FROM buckets ORDER BY created_at DESC")
 	if e != nil {
 		return nil, e
 	}
@@ -91,7 +96,7 @@ func (s *Store) ListBuckets(ctx context.Context) ([]model.Bucket, error) {
 	var out []model.Bucket
 	for rows.Next() {
 		var b model.Bucket
-		if e = rows.Scan(&b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt); e != nil {
+		if e = rows.Scan(&b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.QuotaUnlimited, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt); e != nil {
 			return nil, e
 		}
 		out = append(out, b)
@@ -100,11 +105,14 @@ func (s *Store) ListBuckets(ctx context.Context) ([]model.Bucket, error) {
 }
 func (s *Store) GetBucket(ctx context.Context, slug string) (model.Bucket, error) {
 	var b model.Bucket
-	e := s.db.QueryRowContext(ctx, "SELECT id,name,slug,visibility,quota_bytes,used_bytes,reserved_bytes,created_at FROM buckets WHERE slug=?", slug).Scan(&b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt)
+	e := s.db.QueryRowContext(ctx, "SELECT id,name,slug,visibility,quota_bytes,quota_unlimited,used_bytes,reserved_bytes,created_at FROM buckets WHERE slug=?", slug).Scan(&b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.QuotaUnlimited, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt)
 	return b, e
 }
-func (s *Store) CreateBucket(ctx context.Context, b model.Bucket, totalLimit int64) (model.Bucket, error) {
-	if b.QuotaBytes <= 0 {
+func (s *Store) CreateBucket(ctx context.Context, b model.Bucket, totalLimit int64, platformUnlimited bool) (model.Bucket, error) {
+	if b.QuotaUnlimited && !platformUnlimited {
+		return b, errors.New("unlimited bucket requires an unlimited primary storage source")
+	}
+	if !b.QuotaUnlimited && b.QuotaBytes <= 0 {
 		return b, errors.New("quota must be greater than zero")
 	}
 	tx, e := s.db.BeginTx(ctx, nil)
@@ -113,17 +121,92 @@ func (s *Store) CreateBucket(ctx context.Context, b model.Bucket, totalLimit int
 	}
 	defer tx.Rollback()
 	var allocated int64
-	if e = tx.QueryRowContext(ctx, "SELECT COALESCE(sum(quota_bytes),0) FROM buckets").Scan(&allocated); e != nil {
+	if e = tx.QueryRowContext(ctx, "SELECT COALESCE(sum(quota_bytes),0) FROM buckets WHERE quota_unlimited=0").Scan(&allocated); e != nil {
 		return b, e
 	}
-	if allocated+b.QuotaBytes > totalLimit {
+	if !b.QuotaUnlimited && allocated+b.QuotaBytes > totalLimit {
 		return b, fmt.Errorf("total quota exceeded")
 	}
-	_, e = tx.ExecContext(ctx, "INSERT INTO buckets(id,name,slug,visibility,quota_bytes,created_at) VALUES(?,?,?,?,?,?)", b.ID, b.Name, b.Slug, b.Visibility, b.QuotaBytes, b.CreatedAt)
+	_, e = tx.ExecContext(ctx, "INSERT INTO buckets(id,name,slug,visibility,quota_bytes,quota_unlimited,created_at) VALUES(?,?,?,?,?,?,?)", b.ID, b.Name, b.Slug, b.Visibility, b.QuotaBytes, b.QuotaUnlimited, b.CreatedAt)
 	if e != nil {
 		return b, e
 	}
 	return b, tx.Commit()
+}
+
+func (s *Store) UpdateBucket(ctx context.Context, slug, name, visibility string, quota int64, unlimited bool, totalLimit int64, platformUnlimited bool) (model.Bucket, error) {
+	if unlimited && !platformUnlimited {
+		return model.Bucket{}, errors.New("unlimited bucket requires an unlimited primary storage source")
+	}
+	if !unlimited && quota <= 0 {
+		return model.Bucket{}, errors.New("quota must be greater than zero")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Bucket{}, err
+	}
+	defer tx.Rollback()
+	var b model.Bucket
+	if err = tx.QueryRowContext(ctx, "SELECT id,name,slug,visibility,quota_bytes,quota_unlimited,used_bytes,reserved_bytes,created_at FROM buckets WHERE slug=?", slug).Scan(&b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.QuotaUnlimited, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt); err != nil {
+		return b, err
+	}
+	if !unlimited && quota < b.UsedBytes+b.ReservedBytes {
+		return b, errors.New("bucket quota cannot be lower than its used and reserved bytes")
+	}
+	var allocated int64
+	if err = tx.QueryRowContext(ctx, "SELECT COALESCE(sum(quota_bytes),0) FROM buckets WHERE quota_unlimited=0 AND id<>?", b.ID).Scan(&allocated); err != nil {
+		return b, err
+	}
+	if !unlimited && allocated+quota > totalLimit {
+		return b, errors.New("total quota exceeded")
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE buckets SET name=?,visibility=?,quota_bytes=?,quota_unlimited=? WHERE id=?", name, visibility, quota, unlimited, b.ID); err != nil {
+		return b, err
+	}
+	b.Name, b.Visibility, b.QuotaBytes, b.QuotaUnlimited = name, visibility, quota, unlimited
+	return b, tx.Commit()
+}
+
+func (s *Store) BucketMetrics(ctx context.Context, bucketID string) (map[string]any, error) {
+	var objects, keys, links int64
+	err := s.db.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM objects WHERE bucket_id=? AND status='ready'),
+		(SELECT count(*) FROM access_keys WHERE bucket_id=? AND revoked=0),
+		(SELECT count(*) FROM public_links l JOIN objects o ON o.id=l.object_id WHERE o.bucket_id=? AND l.revoked=0)`, bucketID, bucketID, bucketID).Scan(&objects, &keys, &links)
+	return map[string]any{"object_count": objects, "active_key_count": keys, "active_public_link_count": links}, err
+}
+
+func (s *Store) BucketAllocations(ctx context.Context, bucketID string) ([]map[string]any, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT o.source_id,COALESCE(s.name,'Legacy S3'),COALESCE(s.kind,'s3'),count(*),COALESCE(sum(o.size),0) FROM objects o LEFT JOIN storage_sources s ON s.id=o.source_id WHERE o.bucket_id=? AND o.status='ready' GROUP BY o.source_id,s.name,s.kind ORDER BY sum(o.size) DESC`, bucketID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var id, name, kind string
+		var count, size int64
+		if err = rows.Scan(&id, &name, &kind, &count, &size); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{"source_id": id, "source_name": name, "source_kind": kind, "object_count": count, "used_bytes": size})
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
+	f, err := os.CreateTemp("", "virsree-snapshot-*.db")
+	if err != nil {
+		return nil, err
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	defer os.Remove(name)
+	if _, err = s.db.ExecContext(ctx, "VACUUM INTO ?", name); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(name)
 }
 func (s *Store) CreateAccessKey(ctx context.Context, k model.AccessKey) error {
 	_, e := s.db.ExecContext(ctx, "INSERT INTO access_keys(id,bucket_id,name,ak,secret_cipher,permissions,created_at) VALUES(?,?,?,?,?,?,?)", k.ID, k.BucketID, k.Name, k.AK, k.SecretCipher, k.Permissions, k.CreatedAt)
@@ -133,7 +216,7 @@ func (s *Store) AccessByAK(ctx context.Context, ak string) (model.AccessKey, mod
 	var k model.AccessKey
 	var b model.Bucket
 	var lastUsed sql.NullTime
-	e := s.db.QueryRowContext(ctx, `SELECT k.id,k.bucket_id,k.name,k.ak,k.secret_cipher,k.permissions,k.revoked,k.created_at,k.last_used_at,b.id,b.name,b.slug,b.visibility,b.quota_bytes,b.used_bytes,b.reserved_bytes,b.created_at FROM access_keys k JOIN buckets b ON b.id=k.bucket_id WHERE k.ak=?`, ak).Scan(&k.ID, &k.BucketID, &k.Name, &k.AK, &k.SecretCipher, &k.Permissions, &k.Revoked, &k.CreatedAt, &lastUsed, &b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt)
+	e := s.db.QueryRowContext(ctx, `SELECT k.id,k.bucket_id,k.name,k.ak,k.secret_cipher,k.permissions,k.revoked,k.created_at,k.last_used_at,b.id,b.name,b.slug,b.visibility,b.quota_bytes,b.quota_unlimited,b.used_bytes,b.reserved_bytes,b.created_at FROM access_keys k JOIN buckets b ON b.id=k.bucket_id WHERE k.ak=?`, ak).Scan(&k.ID, &k.BucketID, &k.Name, &k.AK, &k.SecretCipher, &k.Permissions, &k.Revoked, &k.CreatedAt, &lastUsed, &b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.QuotaUnlimited, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt)
 	if lastUsed.Valid {
 		k.LastUsedAt = lastUsed.Time
 	}
@@ -227,7 +310,8 @@ func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt tim
 	}
 
 	var q, u, r, oldSize int64
-	if e = tx.QueryRowContext(ctx, "SELECT quota_bytes,used_bytes,reserved_bytes FROM buckets WHERE id=?", o.BucketID).Scan(&q, &u, &r); e != nil {
+	var quotaUnlimited bool
+	if e = tx.QueryRowContext(ctx, "SELECT quota_bytes,quota_unlimited,used_bytes,reserved_bytes FROM buckets WHERE id=?", o.BucketID).Scan(&q, &quotaUnlimited, &u, &r); e != nil {
 		return e
 	}
 	var oldSource string
@@ -236,7 +320,7 @@ func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt tim
 	if reserved < 0 {
 		reserved = 0
 	}
-	if u+r+reserved > q {
+	if !quotaUnlimited && u+r+reserved > q {
 		return errors.New("bucket quota exceeded")
 	}
 	sourceReserved := o.Size
@@ -245,10 +329,11 @@ func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt tim
 	}
 	if o.SourceID != "" {
 		var cap, used, sr int64
-		if e = tx.QueryRowContext(ctx, "SELECT capacity_bytes,used_bytes,reserved_bytes FROM storage_sources WHERE id=? AND enabled=1", o.SourceID).Scan(&cap, &used, &sr); e != nil {
+		var capacityUnlimited bool
+		if e = tx.QueryRowContext(ctx, "SELECT capacity_bytes,capacity_unlimited,used_bytes,reserved_bytes FROM storage_sources WHERE id=? AND enabled=1", o.SourceID).Scan(&cap, &capacityUnlimited, &used, &sr); e != nil {
 			return e
 		}
-		if used+sr+sourceReserved > cap {
+		if !capacityUnlimited && used+sr+sourceReserved > cap {
 			return errors.New("storage source capacity exceeded")
 		}
 	}

@@ -24,6 +24,12 @@ func errorFor(raw string, status int) localizedError {
 		return localizedError{"storage_kind_immutable", "存储源类型创建后不能更改。请添加一个新的存储源。", "A storage source type cannot be changed after creation. Add a new storage source instead."}
 	case strings.Contains(message, "storage source capacity cannot be lower"):
 		return localizedError{"storage_capacity_too_small", "容量不能低于该存储源已使用和已预留空间的总和。", "Capacity cannot be lower than the source's combined used and reserved space."}
+	case strings.Contains(message, "primary storage source must remain unlimited"):
+		return localizedError{"primary_storage_must_remain_unlimited", "当前存在无限容量的虚拟桶，因此最高优先级存储源必须保持无限容量。请先把这些虚拟桶调整为有限容量。", "Unlimited virtual buckets currently exist, so the highest-priority storage source must remain unlimited. Set those buckets to finite limits first."}
+	case strings.Contains(message, "unlimited bucket requires an unlimited primary"):
+		return localizedError{"unlimited_bucket_requires_unlimited_storage", "只有最高优先级存储源设为无限容量时，虚拟桶才能设为无限。", "A virtual bucket can be unlimited only when the highest-priority storage source is unlimited."}
+	case strings.Contains(message, "bucket quota cannot be lower"):
+		return localizedError{"bucket_quota_too_small", "桶容量不能低于已经使用和上传预留空间的总和。", "The bucket limit cannot be lower than its combined used and reserved space."}
 	case strings.Contains(message, "bitiful cdn authentication key is required"):
 		return localizedError{"storage_cdn_key_required", "使用缤纷云高级鉴权时必须填写 CDN 鉴权 Key。请从缤纷云 CDN 项目的“高级鉴权”配置中取得该 Key。", "Bitiful advanced authentication requires the CDN authentication key. Copy it from Advanced Authentication in the Bitiful CDN project."}
 	case strings.Contains(message, "storage verification failed") && strings.Contains(message, "download probe") && (strings.Contains(message, "403 forbidden") || strings.Contains(message, "accessdenied") || strings.Contains(message, "signaturedoesnotmatch")):

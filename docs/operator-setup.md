@@ -20,7 +20,7 @@ VirSree 使用服务端 OIDC Authorization Code + PKCE 流程。生产环境必�
 ./deploy/configure-production.sh
 ```
 
-默认目标是 `cruty.cn`，公开地址是 `https://storage.cruty.cn`。其他部署可通过 `RVS_DEPLOY_HOST` 和 `RVS_PUBLIC_URL` 覆盖。`/etc/rosemary-virsree.env` 和 SQLite 数据库必须一起备份；丢失或更换 `RVS_MASTER_KEY` 后，已加密的存储源凭据与虚拟 SK 无法恢复。
+默认目标是 `cruty.cn`，公开地址是 `https://storage.cruty.cn`。其他部署可通过 `RVS_DEPLOY_HOST` 和 `RVS_PUBLIC_URL` 覆盖。VirSree 会自动备份 SQLite，但解密仍依赖 `/etc/rosemary-virsree.env` 中的 `RVS_MASTER_KEY`；必须用服务器自己的安全备份机制单独保护该环境文件。丢失或更换主密钥后，自动快照、存储源凭据与虚拟 SK 都无法恢复。
 
 ## 2. 首次登录与 OOBE
 
@@ -40,8 +40,22 @@ OOBE 后可在 **存储源** 页面继续添加来源。每个来源包含：
 - VirSree 容量上限：`used + reserved` 达到上限后，新上传自动尝试下一来源。
 - 已使用空间：成功 commit 后记账。
 - 上传预留：签发上传地址时记账，上传到期后回收。
+- 无限容量：来源不再执行字节上限判断。只有最高优先级来源为无限时，虚拟桶才允许设置为无限。
 
 一个对象一旦 commit，会一直从记录的来源读取、删除和轮换物理键。增加新的高优先级来源不会自动搬迁旧对象。
+
+### VirSree 平台文件系统与滚动备份
+
+最高优先级且可用的存储源是 VirSree 赖以生存的平台文件系统。服务在该来源的 `virsree-system/v1/` 保留命名空间内写入：
+
+- `filesystem.json`：不含凭据的布局与最近更新时间标记；
+- `backups/slot-NN.rvsbak`：SQLite 一致性快照经 gzip 压缩，再使用与凭据相同的 `RVS_MASTER_KEY` 派生 AES-256-GCM 密钥整体加密。
+
+SQLite 快照包含虚拟桶、虚拟/真实对象键映射、对象状态、上传预留、访问密钥密文、存储源配置密文、公开链接、OIDC 会话和脱敏审计记录。默认每 6 小时执行一次并覆盖 7 个固定槽位；可用 `RVS_BACKUP_INTERVAL_SECONDS`（至少 60 秒）和 `RVS_BACKUP_RETENTION`（2–30）调整。最高优先级变化后，下一次快照自动写入新的主来源。失败时服务继续提供请求，并每分钟重试；管理台“存储源”页面显示最近结果和稳定错误码。
+
+这些快照不包含服务器环境文件和 systemd journal。恢复时需要同一份 `RVS_MASTER_KEY`：先解开 `.rvsbak` JSON 中的 `payload`，再 gunzip 得到 SQLite 文件，停服后替换 `RVS_DATABASE`。上线前应定期在隔离环境演练恢复，并继续独立备份 `/etc/rosemary-virsree.env`。
+
+若存在无限容量虚拟桶，VirSree 会拒绝把最高优先级来源改成有限容量，也会拒绝让一个有限来源通过优先级调整成为主来源。先在虚拟桶管理页改回有限容量，再调整存储源。
 
 ## 4. S3 存储源
 
@@ -80,6 +94,9 @@ GET  /api/v1/storage-sources
 POST /api/v1/storage-sources
 GET  /api/v1/storage-sources/{id}
 PUT  /api/v1/storage-sources/{id}
+GET  /api/v1/platform-filesystem
+GET  /api/v1/admin/buckets/{bucket}
+PUT  /api/v1/admin/buckets/{bucket}
 ```
 
 `POST` 和 `PUT` 都会同步完成连接与完整数据面验证，成功时返回 `verified: true`。编辑时凭据字段留空会继续使用原先加密保存的凭据；只有验证成功后才会一次性替换配置，失败时现有来源继续运行。

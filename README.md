@@ -22,6 +22,7 @@ flowchart LR
   G -->|select by priority and capacity| S[(Private S3 / WebDAV sources)]
   A -.->|S3: PUT / GET using presigned URL| S
   G --> M[(SQLite metadata\nkeys, quotas, mappings, audit)]
+  M -->|encrypted rolling snapshot| S
 ```
 
 The real key is opaque and generation-based, for example `rosemary/bkt_x/g123/reports/q3.pdf`. Applications only see `reports/q3.pdf` in their virtual bucket.
@@ -42,7 +43,9 @@ go run ./cmd/server
 
 Open `http://127.0.0.1:8080` and log in through the configured OIDC provider using an allowlisted email. A fresh database starts the guided **Welcome → storage source → console** OOBE. `RVS_ADMIN_TOKEN` remains available for administrative automation; it is not the browser login.
 
-The console provides capacity overview, virtual-bucket creation, object browsing and operations, four independent key permissions, one-click Agent prompts, and configuration guidance. Object downloads opened from the console still go directly to S3 and require the operator to choose the signature duration.
+The console provides capacity overview, virtual-bucket creation and resizing, unlimited source/bucket modes, detailed endpoint and status inspection, object browsing and operations, four independent key permissions, one-click Agent prompts, and configuration guidance. Object downloads opened from the console still go directly to S3 and require the operator to choose the signature duration.
+
+The highest-priority source also hosts VirSree's reserved `virsree-system/v1/` filesystem. By default, VirSree writes a consistent, compressed, AES-256-GCM encrypted SQLite snapshot every six hours and rotates across seven fixed slots. The snapshot includes audit records, virtual-to-physical mappings and encrypted credential records. The storage source page reports backup health. Keep `RVS_MASTER_KEY` in an independent secure backup because storage snapshots cannot decrypt themselves.
 
 Every physical bucket or WebDAV collection must already exist and remain private. VirSree does not expose physical credentials to applications. See [the operator setup guide](docs/operator-setup.md) for OIDC, multi-source allocation, S3-compatible CDN rules and the WebDAV transfer boundary.
 
@@ -129,7 +132,7 @@ For the provided `storage.cruty.cn` deployment, first register the exact OIDC ca
 
 After the first OIDC login, the browser OOBE verifies and saves the initial S3 or WebDAV source. See [docs/operator-setup.md](docs/operator-setup.md) before adding a CDN endpoint.
 
-Terminate TLS in a reverse proxy or load balancer. Persist both the `rosemary-data` volume and `RVS_MASTER_KEY`; losing either breaks access to existing virtual credentials. The full operator and application walkthrough is in [docs/integration.md](docs/integration.md).
+Terminate TLS in a reverse proxy or load balancer. Persist `RVS_MASTER_KEY` independently; losing it makes both live encrypted credentials and the automatic storage snapshots unreadable. The full operator and application walkthrough is in [docs/integration.md](docs/integration.md).
 
 ```bash
 make test

@@ -24,6 +24,7 @@ type StorageSourceInput struct {
 	Kind                    string `json:"kind"`
 	Priority                int    `json:"priority"`
 	CapacityBytes           int64  `json:"capacity_bytes"`
+	CapacityUnlimited       bool   `json:"capacity_unlimited"`
 	Endpoint                string `json:"endpoint"`
 	PublicEndpoint          string `json:"public_endpoint"`
 	Region                  string `json:"region"`
@@ -160,8 +161,8 @@ func (m *StorageManager) prepare(ctx context.Context, in StorageSourceInput, exi
 			in.CDNMode = "s3_sigv4"
 		}
 	}
-	if in.Name == "" || in.CapacityBytes <= 0 {
-		return in, storedSourceConfig{}, nil, errors.New("name and positive capacity_bytes are required")
+	if in.Name == "" || (!in.CapacityUnlimited && in.CapacityBytes <= 0) {
+		return in, storedSourceConfig{}, nil, errors.New("name and positive capacity_bytes are required unless capacity is unlimited")
 	}
 	if in.Kind == "s3" && (in.Region == "" || in.Bucket == "" || in.AccessKey == "" || in.SecretKey == "") {
 		return in, storedSourceConfig{}, nil, errors.New("region, bucket, access_key and secret_key are required for S3")
@@ -209,7 +210,10 @@ func (m *StorageManager) Add(ctx context.Context, in StorageSourceInput) (model.
 	if e != nil {
 		return model.StorageSource{}, e
 	}
-	v := model.StorageSource{ID: secretbox.Random("src_", 10), Name: in.Name, Kind: in.Kind, Priority: in.Priority, CapacityBytes: in.CapacityBytes, Enabled: true, Direct: in.Kind == "s3", CDNEnabled: in.CDNEndpoint != "", ConfigCipher: cipher, CreatedAt: time.Now().UTC()}
+	v := model.StorageSource{ID: secretbox.Random("src_", 10), Name: in.Name, Kind: in.Kind, Priority: in.Priority, CapacityBytes: in.CapacityBytes, CapacityUnlimited: in.CapacityUnlimited, Enabled: true, Direct: in.Kind == "s3", CDNEnabled: in.CDNEndpoint != "", ConfigCipher: cipher, CreatedAt: time.Now().UTC()}
+	if e = m.validatePrimaryCapacity(ctx, v); e != nil {
+		return v, e
+	}
 	if e = m.db.CreateStorageSource(ctx, v); e != nil {
 		return v, e
 	}
@@ -271,8 +275,11 @@ func (m *StorageManager) Update(ctx context.Context, id string, in StorageSource
 		return current, bucketChanged, e
 	}
 	updated := current
-	updated.Name, updated.Kind, updated.Priority, updated.CapacityBytes = in.Name, in.Kind, in.Priority, in.CapacityBytes
+	updated.Name, updated.Kind, updated.Priority, updated.CapacityBytes, updated.CapacityUnlimited = in.Name, in.Kind, in.Priority, in.CapacityBytes, in.CapacityUnlimited
 	updated.Enabled, updated.Direct, updated.CDNEnabled, updated.ConfigCipher = true, in.Kind == "s3", in.CDNEndpoint != "", cipher
+	if e = m.validatePrimaryCapacity(ctx, updated); e != nil {
+		return current, bucketChanged, e
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e = m.db.UpdateStorageSource(ctx, updated); e != nil {
@@ -280,6 +287,46 @@ func (m *StorageManager) Update(ctx context.Context, id string, in StorageSource
 	}
 	m.sources[id] = sourceRuntime{meta: updated, backend: b}
 	return updated, bucketChanged, nil
+}
+
+func (m *StorageManager) validatePrimaryCapacity(ctx context.Context, candidate model.StorageSource) error {
+	hasUnlimited, err := m.db.HasUnlimitedBuckets(ctx)
+	if err != nil || !hasUnlimited {
+		return err
+	}
+	sources, err := m.db.ListStorageSources(ctx)
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range sources {
+		if sources[i].ID == candidate.ID {
+			sources[i] = candidate
+			found = true
+		}
+	}
+	if !found {
+		sources = append(sources, candidate)
+	}
+	var enabled []model.StorageSource
+	for _, source := range sources {
+		if source.Enabled {
+			enabled = append(enabled, source)
+		}
+	}
+	sort.SliceStable(enabled, func(i, j int) bool {
+		if enabled[i].Priority == enabled[j].Priority {
+			if enabled[i].CreatedAt.Equal(enabled[j].CreatedAt) {
+				return enabled[i].ID < enabled[j].ID
+			}
+			return enabled[i].CreatedAt.Before(enabled[j].CreatedAt)
+		}
+		return enabled[i].Priority < enabled[j].Priority
+	})
+	if len(enabled) > 0 && !enabled[0].CapacityUnlimited {
+		return errors.New("the primary storage source must remain unlimited while unlimited virtual buckets exist")
+	}
+	return nil
 }
 
 // normalizeS3ServiceEndpoint repairs a common console-copy mistake. S3 SDK base
@@ -374,9 +421,22 @@ func (m *StorageManager) candidates() []sourceRuntime {
 		return out[i].meta.Priority < out[j].meta.Priority
 	})
 	if len(out) == 0 && m.legacy != nil && m.legacy.Ready() {
-		out = append(out, sourceRuntime{meta: model.StorageSource{ID: "", Name: "Legacy S3", Kind: "s3", Priority: 0, CapacityBytes: 1 << 62, Enabled: true, Direct: true}, backend: m.legacy})
+		out = append(out, sourceRuntime{meta: model.StorageSource{ID: "", Name: "Legacy S3", Kind: "s3", Priority: 0, CapacityBytes: 1 << 62, CapacityUnlimited: false, Enabled: true, Direct: true}, backend: m.legacy})
 	}
 	return out
+}
+
+func (m *StorageManager) Primary() (model.StorageSource, provider.Backend, bool) {
+	candidates := m.candidates()
+	if len(candidates) == 0 {
+		return model.StorageSource{}, nil, false
+	}
+	return candidates[0].meta, candidates[0].backend, true
+}
+
+func (m *StorageManager) PrimaryUnlimited() bool {
+	meta, _, ok := m.Primary()
+	return ok && meta.CapacityUnlimited
 }
 func (m *StorageManager) backend(id string) (provider.Backend, error) {
 	if id == "" && m.legacy != nil {

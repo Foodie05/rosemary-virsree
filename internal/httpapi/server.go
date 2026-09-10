@@ -75,6 +75,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/storage-sources/{id}", s.admin(s.updateStorageSource))
 	s.mux.HandleFunc("GET /api/v1/overview", s.admin(s.overview))
 	s.mux.HandleFunc("GET /api/v1/buckets", s.admin(s.buckets))
+	s.mux.HandleFunc("GET /api/v1/admin/buckets/{bucket}", s.admin(s.bucketDetail))
+	s.mux.HandleFunc("PUT /api/v1/admin/buckets/{bucket}", s.admin(s.updateBucket))
+	s.mux.HandleFunc("GET /api/v1/platform-filesystem", s.admin(s.platformFilesystem))
 	s.mux.HandleFunc("GET /api/v1/access-keys", s.admin(s.keys))
 	s.mux.HandleFunc("POST /api/v1/bootstrap-tokens", s.admin(s.bootstrap))
 	s.mux.HandleFunc("POST /api/v1/agent/claim", s.claim)
@@ -204,6 +207,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	v["total_quota"] = s.svc.Config.TotalQuota
 	v["backend_ready"] = s.svc.Storage.Ready()
+	v["primary_source_unlimited"] = s.svc.Storage.PrimaryUnlimited()
 	write(w, 200, v)
 }
 func (s *Server) buckets(w http.ResponseWriter, r *http.Request) {
@@ -220,12 +224,13 @@ func (s *Server) createBucket(w http.ResponseWriter, r *http.Request) {
 		Slug       string `json:"slug"`
 		Visibility string `json:"visibility"`
 		Quota      int64  `json:"quota_bytes"`
+		Unlimited  bool   `json:"quota_unlimited"`
 	}
 	if e := decode(r, &in); e != nil {
 		fail(w, r, 400, e.Error())
 		return
 	}
-	b, e := s.svc.NewBucket(r.Context(), in.Name, in.Slug, in.Visibility, in.Quota)
+	b, e := s.svc.NewBucket(r.Context(), in.Name, in.Slug, in.Visibility, in.Quota, in.Unlimited)
 	if e != nil {
 		fail(w, r, 400, e.Error())
 		return
@@ -236,6 +241,38 @@ func (s *Server) createBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, 201, map[string]any{"bucket": b, "access_key": k.AK, "secret_key": secret, "shown_once": true})
+}
+
+func (s *Server) bucketDetail(w http.ResponseWriter, r *http.Request) {
+	v, err := s.svc.BucketDetail(r.Context(), r.PathValue("bucket"))
+	if err != nil {
+		fail(w, r, http.StatusNotFound, "virtual bucket not found")
+		return
+	}
+	write(w, http.StatusOK, v)
+}
+
+func (s *Server) updateBucket(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name       string `json:"name"`
+		Visibility string `json:"visibility"`
+		Quota      int64  `json:"quota_bytes"`
+		Unlimited  bool   `json:"quota_unlimited"`
+	}
+	if err := decode(r, &in); err != nil {
+		fail(w, r, 400, err.Error())
+		return
+	}
+	b, err := s.svc.UpdateBucket(r.Context(), r.PathValue("bucket"), in.Name, in.Visibility, in.Quota, in.Unlimited)
+	if err != nil {
+		fail(w, r, 400, err.Error())
+		return
+	}
+	write(w, http.StatusOK, b)
+}
+
+func (s *Server) platformFilesystem(w http.ResponseWriter, r *http.Request) {
+	write(w, http.StatusOK, s.svc.PlatformFS.Status())
 }
 func (s *Server) keys(w http.ResponseWriter, r *http.Request) {
 	v, e := s.svc.DB.ListKeys(r.Context())

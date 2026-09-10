@@ -40,6 +40,9 @@ func main() {
 		slog.Error("storage sources failed", "error", err)
 		os.Exit(1)
 	}
+	appCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	go svc.PlatformFS.Run(appCtx)
 	server := &http.Server{Addr: cfg.Listen, Handler: httpapi.New(svc).Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
 	go func() {
 		slog.Info("VirSree gateway ready", "listen", cfg.Listen, "public_url", cfg.PublicURL, "backend_ready", cfg.BackendReady(), "version", buildinfo.NormalizedVersion(), "commit", buildinfo.Commit)
@@ -48,9 +51,7 @@ func main() {
 			os.Exit(1)
 		}
 	}()
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	<-appCtx.Done()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = server.Shutdown(ctx)

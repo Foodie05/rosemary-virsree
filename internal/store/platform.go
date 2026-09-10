@@ -10,11 +10,11 @@ import (
 )
 
 func (s *Store) CreateStorageSource(ctx context.Context, v model.StorageSource) error {
-	_, e := s.db.ExecContext(ctx, `INSERT INTO storage_sources(id,name,kind,priority,capacity_bytes,enabled,direct_transfer,cdn_enabled,config_cipher,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, v.ID, v.Name, v.Kind, v.Priority, v.CapacityBytes, v.Enabled, v.Direct, v.CDNEnabled, v.ConfigCipher, v.CreatedAt)
+	_, e := s.db.ExecContext(ctx, `INSERT INTO storage_sources(id,name,kind,priority,capacity_bytes,capacity_unlimited,enabled,direct_transfer,cdn_enabled,config_cipher,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, v.ID, v.Name, v.Kind, v.Priority, v.CapacityBytes, v.CapacityUnlimited, v.Enabled, v.Direct, v.CDNEnabled, v.ConfigCipher, v.CreatedAt)
 	return e
 }
 func (s *Store) ListStorageSources(ctx context.Context) ([]model.StorageSource, error) {
-	rows, e := s.db.QueryContext(ctx, `SELECT id,name,kind,priority,capacity_bytes,used_bytes,reserved_bytes,enabled,direct_transfer,cdn_enabled,config_cipher,created_at FROM storage_sources ORDER BY priority,created_at,id`)
+	rows, e := s.db.QueryContext(ctx, `SELECT id,name,kind,priority,capacity_bytes,capacity_unlimited,used_bytes,reserved_bytes,enabled,direct_transfer,cdn_enabled,config_cipher,created_at FROM storage_sources ORDER BY priority,created_at,id`)
 	if e != nil {
 		return nil, e
 	}
@@ -22,7 +22,7 @@ func (s *Store) ListStorageSources(ctx context.Context) ([]model.StorageSource, 
 	var out []model.StorageSource
 	for rows.Next() {
 		var v model.StorageSource
-		if e = rows.Scan(&v.ID, &v.Name, &v.Kind, &v.Priority, &v.CapacityBytes, &v.UsedBytes, &v.ReservedBytes, &v.Enabled, &v.Direct, &v.CDNEnabled, &v.ConfigCipher, &v.CreatedAt); e != nil {
+		if e = rows.Scan(&v.ID, &v.Name, &v.Kind, &v.Priority, &v.CapacityBytes, &v.CapacityUnlimited, &v.UsedBytes, &v.ReservedBytes, &v.Enabled, &v.Direct, &v.CDNEnabled, &v.ConfigCipher, &v.CreatedAt); e != nil {
 			return nil, e
 		}
 		out = append(out, v)
@@ -31,7 +31,7 @@ func (s *Store) ListStorageSources(ctx context.Context) ([]model.StorageSource, 
 }
 func (s *Store) GetStorageSource(ctx context.Context, id string) (model.StorageSource, error) {
 	var v model.StorageSource
-	e := s.db.QueryRowContext(ctx, `SELECT id,name,kind,priority,capacity_bytes,used_bytes,reserved_bytes,enabled,direct_transfer,cdn_enabled,config_cipher,created_at FROM storage_sources WHERE id=?`, id).Scan(&v.ID, &v.Name, &v.Kind, &v.Priority, &v.CapacityBytes, &v.UsedBytes, &v.ReservedBytes, &v.Enabled, &v.Direct, &v.CDNEnabled, &v.ConfigCipher, &v.CreatedAt)
+	e := s.db.QueryRowContext(ctx, `SELECT id,name,kind,priority,capacity_bytes,capacity_unlimited,used_bytes,reserved_bytes,enabled,direct_transfer,cdn_enabled,config_cipher,created_at FROM storage_sources WHERE id=?`, id).Scan(&v.ID, &v.Name, &v.Kind, &v.Priority, &v.CapacityBytes, &v.CapacityUnlimited, &v.UsedBytes, &v.ReservedBytes, &v.Enabled, &v.Direct, &v.CDNEnabled, &v.ConfigCipher, &v.CreatedAt)
 	return v, e
 }
 func (s *Store) UpdateStorageSource(ctx context.Context, v model.StorageSource) error {
@@ -44,13 +44,19 @@ func (s *Store) UpdateStorageSource(ctx context.Context, v model.StorageSource) 
 	if e = tx.QueryRowContext(ctx, "SELECT used_bytes,reserved_bytes FROM storage_sources WHERE id=?", v.ID).Scan(&used, &reserved); e != nil {
 		return e
 	}
-	if v.CapacityBytes < used+reserved {
+	if !v.CapacityUnlimited && v.CapacityBytes < used+reserved {
 		return errors.New("storage source capacity cannot be lower than its used and reserved bytes")
 	}
-	if _, e = tx.ExecContext(ctx, `UPDATE storage_sources SET name=?,kind=?,priority=?,capacity_bytes=?,enabled=?,direct_transfer=?,cdn_enabled=?,config_cipher=? WHERE id=?`, v.Name, v.Kind, v.Priority, v.CapacityBytes, v.Enabled, v.Direct, v.CDNEnabled, v.ConfigCipher, v.ID); e != nil {
+	if _, e = tx.ExecContext(ctx, `UPDATE storage_sources SET name=?,kind=?,priority=?,capacity_bytes=?,capacity_unlimited=?,enabled=?,direct_transfer=?,cdn_enabled=?,config_cipher=? WHERE id=?`, v.Name, v.Kind, v.Priority, v.CapacityBytes, v.CapacityUnlimited, v.Enabled, v.Direct, v.CDNEnabled, v.ConfigCipher, v.ID); e != nil {
 		return e
 	}
 	return tx.Commit()
+}
+
+func (s *Store) HasUnlimitedBuckets(ctx context.Context) (bool, error) {
+	var found bool
+	err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM buckets WHERE quota_unlimited=1)").Scan(&found)
+	return found, err
 }
 func (s *Store) StorageConfigured(ctx context.Context) bool {
 	var n int

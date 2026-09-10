@@ -21,10 +21,11 @@ import (
 var slugRx = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
 
 type Service struct {
-	DB      *store.Store
-	Storage *StorageManager
-	Box     *secretbox.Box
-	Config  config.Config
+	DB         *store.Store
+	Storage    *StorageManager
+	Box        *secretbox.Box
+	Config     config.Config
+	PlatformFS *PlatformFilesystem
 }
 type Credential struct {
 	AccessKey, SecretKey string `json:"-"`
@@ -37,9 +38,11 @@ func New(db *store.Store, p *provider.S3, b *secretbox.Box, c config.Config) (*S
 	if err := m.Load(context.Background()); err != nil {
 		return nil, fmt.Errorf("load storage sources: %w", err)
 	}
-	return &Service{DB: db, Storage: m, Box: b, Config: c}, nil
+	s := &Service{DB: db, Storage: m, Box: b, Config: c}
+	s.PlatformFS = NewPlatformFilesystem(db, m, b, time.Duration(c.BackupInterval)*time.Second, c.BackupRetention)
+	return s, nil
 }
-func (s *Service) NewBucket(ctx context.Context, name, slug, visibility string, quota int64) (model.Bucket, error) {
+func (s *Service) NewBucket(ctx context.Context, name, slug, visibility string, quota int64, unlimited bool) (model.Bucket, error) {
 	slug = strings.ToLower(strings.TrimSpace(slug))
 	if !slugRx.MatchString(slug) {
 		return model.Bucket{}, errors.New("slug must be 3-63 lowercase letters, numbers or hyphens")
@@ -47,12 +50,51 @@ func (s *Service) NewBucket(ctx context.Context, name, slug, visibility string, 
 	if visibility != "private" && visibility != "public" {
 		return model.Bucket{}, errors.New("visibility must be private or public")
 	}
-	b := model.Bucket{ID: secretbox.Random("bkt_", 12), Name: name, Slug: slug, Visibility: visibility, QuotaBytes: quota, CreatedAt: time.Now().UTC()}
-	b, e := s.DB.CreateBucket(ctx, b, s.Config.TotalQuota)
+	b := model.Bucket{ID: secretbox.Random("bkt_", 12), Name: strings.TrimSpace(name), Slug: slug, Visibility: visibility, QuotaBytes: quota, QuotaUnlimited: unlimited, CreatedAt: time.Now().UTC()}
+	b, e := s.DB.CreateBucket(ctx, b, s.Config.TotalQuota, s.Storage.PrimaryUnlimited())
 	if e == nil {
-		s.DB.Audit(ctx, "bucket.created", slug, fmt.Sprintf("quota=%d visibility=%s", quota, visibility))
+		s.DB.Audit(ctx, "bucket.created", slug, fmt.Sprintf("quota=%d unlimited=%t visibility=%s", quota, unlimited, visibility))
 	}
 	return b, e
+}
+
+func (s *Service) UpdateBucket(ctx context.Context, slug, name, visibility string, quota int64, unlimited bool) (model.Bucket, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return model.Bucket{}, errors.New("name is required")
+	}
+	if visibility != "private" && visibility != "public" {
+		return model.Bucket{}, errors.New("visibility must be private or public")
+	}
+	b, err := s.DB.UpdateBucket(ctx, slug, name, visibility, quota, unlimited, s.Config.TotalQuota, s.Storage.PrimaryUnlimited())
+	if err == nil {
+		s.DB.Audit(ctx, "bucket.updated", slug, fmt.Sprintf("quota=%d unlimited=%t visibility=%s", quota, unlimited, visibility))
+	}
+	return b, err
+}
+
+func (s *Service) BucketDetail(ctx context.Context, slug string) (map[string]any, error) {
+	b, err := s.DB.GetBucket(ctx, slug)
+	if err != nil {
+		return nil, err
+	}
+	metrics, err := s.DB.BucketMetrics(ctx, b.ID)
+	if err != nil {
+		return nil, err
+	}
+	allocations, err := s.DB.BucketAllocations(ctx, b.ID)
+	if err != nil {
+		return nil, err
+	}
+	region := s.Config.Backend.Region
+	if region == "" {
+		region = "us-east-1"
+	}
+	return map[string]any{
+		"bucket": b, "status": map[bool]string{true: "ready", false: "storage_unavailable"}[s.Storage.Ready()],
+		"s3_endpoint": s.Config.PublicURL + "/s3", "api_endpoint": s.Config.PublicURL + "/api/v1/buckets/" + b.Slug,
+		"region": region, "can_set_unlimited": s.Storage.PrimaryUnlimited(), "metrics": metrics, "allocations": allocations,
+	}, nil
 }
 func (s *Service) NewKey(ctx context.Context, b model.Bucket, name, perms string) (model.AccessKey, string, error) {
 	if perms == "" {
@@ -147,7 +189,7 @@ func (s *Service) Claim(ctx context.Context, token, name, slug, visibility strin
 	if _, e = s.DB.ClaimBootstrap(ctx, hash); e != nil {
 		return model.Bucket{}, model.AccessKey{}, "", e
 	}
-	b, e := s.NewBucket(ctx, name, slug, visibility, quota)
+	b, e := s.NewBucket(ctx, name, slug, visibility, quota, false)
 	if e != nil {
 		return b, model.AccessKey{}, "", e
 	}

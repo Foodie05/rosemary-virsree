@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.0 — 2026-09-10
+
+- Establish a reserved VirSree platform filesystem on the highest-priority storage source and write periodic, AES-256-GCM encrypted rolling SQLite snapshots containing metadata, audit history, credentials ciphertext, and virtual-to-physical object mappings.
+- Add explicit unlimited capacity modes for storage sources and virtual buckets, with server-side invariants that require the primary source to remain unlimited while any unlimited bucket exists.
+- Add editable virtual bucket names, visibility, and capacity limits, plus a management detail view with endpoints, status, Region, object/key/link counts, and per-source object allocation.
+
 ## v0.2.7 — 2026-09-09
 
 - Add Bitiful CDN advanced authentication with application-selected `_ts` expiry and server-side `_btf_tk` signing.

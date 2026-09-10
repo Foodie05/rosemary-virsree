@@ -17,7 +17,7 @@ func TestReplacementOnlyReservesGrowth(t *testing.T) {
 	defer db.Close()
 	ctx := context.Background()
 	b := model.Bucket{ID: "b1", Name: "Bucket", Slug: "bucket-one", Visibility: "private", QuotaBytes: 200, CreatedAt: time.Now().UTC()}
-	if _, err = db.CreateBucket(ctx, b, 1000); err != nil {
+	if _, err = db.CreateBucket(ctx, b, 1000, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -69,5 +69,38 @@ func TestReplacementOnlyReservesGrowth(t *testing.T) {
 	}
 	if _, _, err = db.PublicObject(ctx, "public-two"); err == nil {
 		t.Fatal("public link survived object deletion")
+	}
+}
+
+func TestBucketQuotaCanBeEditedAndUnlimitedIsExplicit(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "quota-edit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	b := model.Bucket{ID: "b2", Name: "Editable", Slug: "editable-bucket", Visibility: "private", QuotaBytes: 100, CreatedAt: time.Now().UTC()}
+	if _, err = db.CreateBucket(ctx, b, 1000, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.UpdateBucket(ctx, b.Slug, "Bigger", "public", 250, false, 1000, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetBucket(ctx, b.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.QuotaBytes != 250 || got.Visibility != "public" || got.QuotaUnlimited {
+		t.Fatalf("unexpected updated bucket: %#v", got)
+	}
+	if _, err = db.UpdateBucket(ctx, b.Slug, "Unlimited", "private", 0, true, 1000, false); err == nil {
+		t.Fatal("unlimited bucket accepted on finite primary source")
+	}
+	got, err = db.UpdateBucket(ctx, b.Slug, "Unlimited", "private", 0, true, 1000, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.QuotaUnlimited {
+		t.Fatal("unlimited flag was not persisted")
 	}
 }
