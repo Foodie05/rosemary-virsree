@@ -103,22 +103,43 @@ func verifyRequest(r *http.Request, p proof, secret string) error {
 	} else if d := time.Since(t); d > 15*time.Minute || d < -15*time.Minute {
 		return errors.New("request time skewed")
 	}
-	canonical := r.Method + "\n" + canonicalURI(r.URL) + "\n" + canonicalQuery(r.URL, p.presigned) + "\n" + canonicalHeaders(r, p.signed) + "\n" + p.signed + "\n" + payload(p.payload)
-	sum := sha256.Sum256([]byte(canonical))
-	sts := "AWS4-HMAC-SHA256\n" + p.amzDate + "\n" + p.scope + "\n" + hex.EncodeToString(sum[:])
 	sc := strings.Split(p.scope, "/")
 	if len(sc) != 4 || sc[2] != "s3" || sc[3] != "aws4_request" {
 		return errors.New("invalid credential scope")
 	}
+	if verifySignature(r, p, secret, nil) {
+		return nil
+	}
+	// Recent AWS Go SDK releases sign `accept-encoding: identity` for S3 GETs.
+	// Some reverse proxies remove that response-negotiation header before forwarding
+	// requests with response bodies. It does not select a resource or change a request
+	// body, so reconstruct the SDK value only when the signed header was stripped.
+	if !p.presigned && signedHeader(p.signed, "accept-encoding") && r.Header.Get("Accept-Encoding") == "" && verifySignature(r, p, secret, map[string]string{"accept-encoding": "identity"}) {
+		return nil
+	}
+	return errors.New("signature mismatch")
+}
+
+func verifySignature(r *http.Request, p proof, secret string, overrides map[string]string) bool {
+	canonical := r.Method + "\n" + canonicalURI(r.URL) + "\n" + canonicalQuery(r.URL, p.presigned) + "\n" + canonicalHeaders(r, p.signed, overrides) + "\n" + p.signed + "\n" + payload(p.payload)
+	sum := sha256.Sum256([]byte(canonical))
+	sts := "AWS4-HMAC-SHA256\n" + p.amzDate + "\n" + p.scope + "\n" + hex.EncodeToString(sum[:])
+	sc := strings.Split(p.scope, "/")
 	dateKey := mac([]byte("AWS4"+secret), sc[0])
 	region := mac(dateKey, sc[1])
 	serviceKey := mac(region, sc[2])
 	signing := mac(serviceKey, sc[3])
 	want := hex.EncodeToString(mac(signing, sts))
-	if subtle.ConstantTimeCompare([]byte(want), []byte(p.signature)) != 1 {
-		return errors.New("signature mismatch")
+	return subtle.ConstantTimeCompare([]byte(want), []byte(p.signature)) == 1
+}
+
+func signedHeader(signed, want string) bool {
+	for _, name := range strings.Split(signed, ";") {
+		if name == want {
+			return true
+		}
 	}
-	return nil
+	return false
 }
 func payload(v string) string {
 	if v == "" {
@@ -159,11 +180,13 @@ func canonicalQuery(u *url.URL, dropSig bool) string {
 	return strings.Join(out, "&")
 }
 func awsEscape(v string) string { return strings.ReplaceAll(url.QueryEscape(v), "+", "%20") }
-func canonicalHeaders(r *http.Request, signed string) string {
+func canonicalHeaders(r *http.Request, signed string, overrides map[string]string) string {
 	var b strings.Builder
 	for _, name := range strings.Split(signed, ";") {
 		var v string
-		if name == "host" {
+		if override, ok := overrides[name]; ok {
+			v = override
+		} else if name == "host" {
 			v = r.Host
 		} else {
 			v = strings.Join(r.Header.Values(http.CanonicalHeaderKey(name)), ",")

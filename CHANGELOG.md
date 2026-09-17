@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.1 — 2026-09-17
+
+- Accept AWS Go SDK v2 Header SigV4 `ListObjectsV2` requests when a reverse proxy strips the signed `Accept-Encoding: identity` response-negotiation header.
+- Add a regression test using the affected AWS Go SDK release and a proxy transport that reproduces the header removal.
+
 ## v0.3.0 — 2026-09-10
 
 - Establish a reserved VirSree platform filesystem on the highest-priority storage source and write periodic, AES-256-GCM encrypted rolling SQLite snapshots containing metadata, audit history, credentials ciphertext, and virtual-to-physical object mappings.
