@@ -6,8 +6,9 @@ const DEFAULT_RELEASE=`${DEFAULT_PROJECT}/releases`;
 const sections=[['start','先分清两个网站'],['install','下载 rvsctl'],['claim','兑换一次性授权'],['configure','配置应用'],['upload','上传：签名直传'],['download','下载与公开链接'],['permissions','权限和配额'],['verify','验收清单'],['errors','常见错误']];
 
 const samples={
-  curl:`# 准备：安装 jq；确保 RVS_GATEWAY、RVS_BUCKET、AWS_ACCESS_KEY_ID、
-# AWS_SECRET_ACCESS_KEY 已由部署环境注入。不要把凭据或签名 URL 写入日志。
+  curl:`# 准备：安装 jq；从 rvsctl Secret 注入 AWS_ENDPOINT_URL、RVS_BUCKET、
+# AWS_ACCESS_KEY_ID、AWS_SECRET_ACCESS_KEY。不要把凭据或签名 URL 写入日志。
+RVS_GATEWAY=$(printf '%s' "$AWS_ENDPOINT_URL" | sed 's@/s3/*$@@')
 FILE=cover.webp
 KEY=images/cover.webp
 CONTENT_TYPE=image/webp
@@ -29,9 +30,10 @@ curl -fsS -X POST "$COMMIT_URL" \\
   -H "X-RVS-Secret-Key: $AWS_SECRET_ACCESS_KEY" \\
   -H 'Content-Type: application/json' -d "$COMMIT_BODY"
 unset SIGNED UPLOAD_URL`,
-  ts:`// Node.js 20+；环境变量来自 rvsctl 写入的受限 Secret。
+  ts:`// 在现有 TypeScript 项目中使用；独立运行可安装 tsx、typescript、@types/node。
+// 环境变量来自 rvsctl 写入的受限 Secret。
 import {readFile} from 'node:fs/promises';
-const gateway = process.env.RVS_GATEWAY!;
+const gateway = new URL(process.env.AWS_ENDPOINT_URL!).origin;
 const bucket = process.env.RVS_BUCKET!;
 const key = 'images/cover.webp';
 const bytes = await readFile('./cover.webp');
@@ -60,9 +62,11 @@ await fetch(signed.commit_url, {method: 'POST',
   py:`# python -m pip install requests
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 import requests
 
-gateway = os.environ['RVS_GATEWAY'].rstrip('/')
+endpoint = urlsplit(os.environ['AWS_ENDPOINT_URL'])
+gateway = f'{endpoint.scheme}://{endpoint.netloc}'
 bucket = os.environ['RVS_BUCKET']
 key = 'images/cover.webp'
 data = Path('cover.webp').read_bytes()
