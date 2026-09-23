@@ -7,15 +7,19 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"rosemary-virsree/internal/buildinfo"
+	"rosemary-virsree/internal/model"
 	"rosemary-virsree/internal/s3compat"
 	"rosemary-virsree/internal/secretbox"
 	"rosemary-virsree/internal/service"
+	"rosemary-virsree/internal/store"
 )
 
 type requestIDKey struct{}
@@ -321,10 +325,43 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 404, "virtual bucket not found")
 		return
 	}
-	objects, e := s.svc.DB.ListObjects(r.Context(), c.Bucket.ID, r.URL.Query().Get("prefix"))
+	q := r.URL.Query()
+	if q.Has("limit") {
+		limit, err := strconv.Atoi(q.Get("limit"))
+		if err != nil || limit < 1 || limit > 1000 {
+			fail(w, r, 400, "limit must be between 1 and 1000")
+			return
+		}
+		if q.Get("browse") == "1" {
+			entries, next, err := s.svc.DB.BrowseObjectsPage(r.Context(), c.Bucket.ID, q.Get("prefix"), q.Get("after"), limit)
+			if err != nil {
+				fail(w, r, 500, err.Error())
+				return
+			}
+			if entries == nil {
+				entries = []store.ObjectEntry{}
+			}
+			write(w, 200, map[string]any{"entries": entries, "next_cursor": next})
+			return
+		}
+		objects, next, err := s.svc.DB.ListObjectsPage(r.Context(), c.Bucket.ID, q.Get("prefix"), q.Get("after"), limit)
+		if err != nil {
+			fail(w, r, 500, err.Error())
+			return
+		}
+		if objects == nil {
+			objects = []model.Object{}
+		}
+		write(w, 200, map[string]any{"objects": objects, "next_cursor": next})
+		return
+	}
+	objects, next, e := s.svc.DB.ListObjectsPage(r.Context(), c.Bucket.ID, q.Get("prefix"), "", 1000)
 	if e != nil {
 		fail(w, r, 500, e.Error())
 		return
+	}
+	if next != "" {
+		w.Header().Set("X-VirSree-Next-Cursor", url.QueryEscape(next))
 	}
 	write(w, 200, objects)
 }

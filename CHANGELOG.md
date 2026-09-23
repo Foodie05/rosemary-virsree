@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.2 — 2026-09-23
+
+- Add real ListObjectsV2 continuation tokens, `max-keys` and `start-after`, and paginated administrative object APIs without silent 1000-object truncation.
+- Replace the flat object table with folder-aware browsing, prefix navigation, page controls, responsive rows, and in-console download and risk dialogs.
+- Enforce virtual bucket visibility for stable `/p/` aliases: private buckets retain signed downloads; switching from public to private stops future alias redirects with a clear warning.
+- Keep one-time credentials and Agent tokens visible through background refreshes, defer version reloads during open workflows, preserve failed operation dialogs, and restore mobile logout access.
+- Correct copy feedback and runnable integration examples, clarify storage status wording, and polish loading and motion with reduced-motion support.
+
 ## v0.3.1 — 2026-09-17
 
 - Accept AWS Go SDK v2 Header SigV4 `ListObjectsV2` requests when a reverse proxy strips the signed `Accept-Encoding: identity` response-negotiation header.

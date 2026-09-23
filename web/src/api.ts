@@ -2,6 +2,8 @@ export type Bucket={id:string;name:string;slug:string;visibility:string;quota_by
 export type Overview={bucket_count:number;object_count:number;active_key_count:number;used_bytes:number;reserved_bytes:number;allocated_quota:number;total_quota:number;backend_ready:boolean;primary_source_unlimited:boolean}
 export type AccessKey={id:string;name:string;access_key:string;permissions:string[];revoked:boolean;created_at:string;bucket:string}
 export type ObjectInfo={id:string;source_id:string;key:string;size:number;content_type:string;etag:string;status:string;generation:number;created_at:string;updated_at:string}
+export type ObjectEntry={key:string;folder:boolean;object?:ObjectInfo}
+export type ObjectBrowsePage={entries:ObjectEntry[];next_cursor:string}
 export type Session={authenticated:boolean;email:string;oidc_configured:boolean;setup_required:boolean}
 export type StorageSource={id:string;name:string;kind:'s3'|'webdav';priority:number;capacity_bytes:number;capacity_unlimited:boolean;used_bytes:number;reserved_bytes:number;enabled:boolean;direct_transfer:boolean;cdn_enabled:boolean;created_at:string}
 export type CDNMode='s3_sigv4'|'bitiful_token'
@@ -44,6 +46,7 @@ export class API{
   createKey(bucket:string,v:object){return this.call<any>(`/api/v1/buckets/${encodeURIComponent(bucket)}/access-keys`,{method:'POST',body:JSON.stringify(v)})}
   revokeKey(id:string){return this.call<void>(`/api/v1/access-keys/${encodeURIComponent(id)}`,{method:'DELETE'})}
   objects(bucket:string,prefix=''){return this.call<ObjectInfo[]>(`/api/v1/admin/buckets/${encodeURIComponent(bucket)}/objects?prefix=${encodeURIComponent(prefix)}`)}
+  browseObjects(bucket:string,prefix='',after='',limit=40){const q=new URLSearchParams({browse:'1',prefix,after,limit:String(limit)});return this.call<ObjectBrowsePage>(`/api/v1/admin/buckets/${encodeURIComponent(bucket)}/objects?${q}`)}
   adminDownload(bucket:string,key:string,expires_in:number){return this.call<{url:string;direct:boolean}>(`/api/v1/admin/buckets/${encodeURIComponent(bucket)}/objects/download`,{method:'POST',body:JSON.stringify({key,expires_in})})}
   invalidateObject(bucket:string,key:string){return this.call<void>(`/api/v1/admin/buckets/${encodeURIComponent(bucket)}/objects/invalidate-links`,{method:'POST',body:JSON.stringify({key})})}
   deleteObject(bucket:string,key:string){return this.call<void>(`/api/v1/admin/buckets/${encodeURIComponent(bucket)}/objects/${key.split('/').map(encodeURIComponent).join('/')}`,{method:'DELETE'})}

@@ -46,14 +46,14 @@ The `/s3` routes use AWS Signature Version 4 with the virtual AK/SK. Permissions
 | `POST` | `/api/v1/buckets/{bucket}/access-keys` | Issue a key with selected permissions; return its secret once |
 | `DELETE` | `/api/v1/access-keys/{id}` | Revoke a virtual key |
 | `POST` | `/api/v1/bootstrap-tokens` | Create a one-use Agent token |
-| `GET` | `/api/v1/admin/buckets/{bucket}/objects` | Browse objects by optional `prefix` |
+| `GET` | `/api/v1/admin/buckets/{bucket}/objects` | Browse objects by optional `prefix`; `browse=1&limit=40&after=...` returns folder-aware `entries` and `next_cursor` |
 | `POST` | `/api/v1/admin/buckets/{bucket}/objects/download` | Create an admin-selected direct download URL |
 | `POST` | `/api/v1/admin/buckets/{bucket}/objects/invalidate-links` | Rotate one physical key |
 | `DELETE` | `/api/v1/admin/buckets/{bucket}/objects/{key...}` | Delete one object |
 
 An update completes the same full data-plane probe as creation before any persisted or runtime configuration changes. Empty credential fields retain the existing encrypted values. A failed probe leaves the active source untouched. Changing an S3 physical bucket requires `acknowledge_bucket_change: true`; clients should show a clear data-availability warning because VirSree does not move existing objects to the new bucket.
 
-The console embeds its release version at build time and compares it with `/api/v1/version` on startup, once per minute, and whenever the tab regains focus. A mismatch reloads the page through a versioned cache-busting URL. The version endpoint and SPA HTML use `no-store`; fingerprinted `/assets/` files use a one-year immutable cache policy.
+The console embeds its release version at build time and compares it with `/api/v1/version` on startup, once per minute, and whenever the tab regains focus. A mismatch reloads the page through a versioned cache-busting URL after open forms, risk dialogs and one-time credentials have been safely dismissed. The version endpoint and SPA HTML use `no-store`; fingerprinted `/assets/` files use a one-year immutable cache policy.
 
 Create bucket body:
 
@@ -110,7 +110,7 @@ It returns the gateway S3 endpoint, virtual bucket, region, virtual AK/SK, and p
 
 Every capability request requires an application-selected positive expiry. S3-compatible backends using SigV4 cap it at 604800 seconds. VirSree does not shorten a valid requested duration. Responses include `direct`: S3 is `true`; generic WebDAV is `false` because the capability URL relays bytes through VirSree.
 
-The public-link response contains `slug`, `public_url`, and `direct_url`. `public_url` is a VirSree alias that can keep working until `link_expires_in`; each visit redirects to a new real URL valid for `sign_expires_in`. Revoke it with the `slug`. Already issued `direct_url` values bypass VirSree and remain usable until their chosen expiry unless the object physical key is rotated.
+Only virtual buckets in `public` mode can create and resolve `/p/` public aliases. Switching a virtual bucket to `private` immediately stops its existing aliases from redirecting; per-request signed downloads remain available to authorized keys. The backing storage source stays private in both modes. The public-link response contains `slug`, `public_url`, and `direct_url`. `public_url` is a VirSree alias that can keep working until `link_expires_in`; each visit redirects to a new real URL valid for `sign_expires_in`. Revoke it with the `slug`. Already issued `direct_url` values bypass VirSree and remain usable until their chosen expiry unless the object physical key is rotated.
 
 ## S3 endpoint
 
@@ -118,7 +118,7 @@ Configure clients with endpoint `https://storage.example.com/s3`, the returned r
 
 | Operation | State | Behavior |
 |---|---|---|
-| ListObjectsV2 | Basic | Prefix filtering and up to 1000 mapped objects; delimiter and pagination are not implemented |
+| ListObjectsV2 | Supported with pagination | Literal prefix filtering, `max-keys` up to 1000, `start-after`, `continuation-token`, `NextContinuationToken` and `IsTruncated`; delimiter is not yet implemented |
 | HeadObject | Supported | Returns mapped metadata |
 | GetObject | Supported with redirect | `307` to a real S3 presigned URL; expiry comes from virtual presign `X-Amz-Expires` or `rvs-expires` / `X-RVS-Expires-In` |
 | DeleteObject | Supported | Deletes real object, then metadata |
@@ -126,7 +126,9 @@ Configure clients with endpoint `https://storage.example.com/s3`, the returned r
 | Multipart upload | Not implemented | Planned as sign-each-part control operations |
 | CopyObject | Not implemented | Internal server-side copy is used for link invalidation |
 | Versioning, tags, ACL, lifecycle, Select | Not implemented | These require explicit virtual semantics |
-| Create/Delete real bucket | Intentionally unavailable | The one configured private backing bucket is infrastructure-owned |
+| Create/Delete real bucket | Intentionally unavailable | Backing S3/WebDAV storage sources are infrastructure-owned |
+
+For the administrative object browser, `browse=1&limit=40&prefix=images/&after=<cursor>` returns `{ "entries": [{"key":"images/2026/","folder":true}, {"key":"images/logo.png","folder":false,"object":{...}}], "next_cursor":"..." }`. Folder rows count once even if they contain many objects. Leave `after` empty on the first page, and URL-encode subsequent cursor query values. Without `browse=1`, `limit` returns `{ "objects": [...], "next_cursor": "..." }`. The legacy route without `limit` keeps its array response and sets a URL-encoded `X-VirSree-Next-Cursor` when more than 1000 objects exist.
 
 ## Central gateway invariant
 

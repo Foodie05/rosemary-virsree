@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS oidc_challenges(state_hash TEXT PRIMARY KEY,nonce TEX
 CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY,email TEXT NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL);
 CREATE TABLE IF NOT EXISTS transfer_tokens(token_hash TEXT PRIMARY KEY,object_id TEXT NOT NULL,source_id TEXT NOT NULL DEFAULT '',physical_key TEXT NOT NULL DEFAULT '',size INTEGER NOT NULL DEFAULT 0,content_type TEXT NOT NULL DEFAULT '',etag TEXT NOT NULL DEFAULT '',mode TEXT NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL,FOREIGN KEY(object_id) REFERENCES objects(id));
 CREATE INDEX IF NOT EXISTS objects_bucket ON objects(bucket_id,status);
+CREATE INDEX IF NOT EXISTS objects_bucket_key ON objects(bucket_id,status,logical_key);
 CREATE INDEX IF NOT EXISTS uploads_expiry ON uploads(expires_at);
 CREATE INDEX IF NOT EXISTS links_slug ON public_links(slug,revoked);
 CREATE INDEX IF NOT EXISTS sources_priority ON storage_sources(enabled,priority);
@@ -497,21 +498,92 @@ func (s *Store) DeleteObject(ctx context.Context, id string) error {
 	}
 	return tx.Commit()
 }
-func (s *Store) ListObjects(ctx context.Context, bucketID, prefix string) ([]model.Object, error) {
-	rows, e := s.db.QueryContext(ctx, "SELECT id,bucket_id,source_id,logical_key,physical_key,size,content_type,etag,status,generation,is_public,created_at,updated_at FROM objects WHERE bucket_id=? AND status='ready' AND logical_key LIKE ? ORDER BY logical_key LIMIT 1000", bucketID, prefix+"%")
+
+// ListObjectsPage returns a stable keyset page. The cursor is the last logical key
+// returned, and prefix matching treats SQL wildcard characters literally.
+func (s *Store) ListObjectsPage(ctx context.Context, bucketID, prefix, after string, limit int) ([]model.Object, string, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, "", errors.New("limit must be between 1 and 1000")
+	}
+	rows, e := s.db.QueryContext(ctx, "SELECT id,bucket_id,source_id,logical_key,physical_key,size,content_type,etag,status,generation,is_public,created_at,updated_at FROM objects WHERE bucket_id=? AND status='ready' AND logical_key>=? AND logical_key>? AND substr(logical_key,1,length(?))=? ORDER BY logical_key LIMIT ?", bucketID, prefix, after, prefix, prefix, limit+1)
 	if e != nil {
-		return nil, e
+		return nil, "", e
 	}
 	defer rows.Close()
 	var out []model.Object
 	for rows.Next() {
 		var o model.Object
 		if e = rows.Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt); e != nil {
-			return nil, e
+			return nil, "", e
 		}
 		out = append(out, o)
 	}
-	return out, rows.Err()
+	if e = rows.Err(); e != nil {
+		return nil, "", e
+	}
+	if len(out) > limit {
+		return out[:limit], out[limit-1].LogicalKey, nil
+	}
+	return out, "", nil
+}
+
+type ObjectEntry struct {
+	Key    string        `json:"key"`
+	Folder bool          `json:"folder"`
+	Object *model.Object `json:"object,omitempty"`
+}
+
+// BrowseObjectsPage groups keys by their next path segment so a folder with
+// many objects occupies one row instead of hiding its siblings behind pages.
+func (s *Store) BrowseObjectsPage(ctx context.Context, bucketID, prefix, after string, limit int) ([]ObjectEntry, string, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, "", errors.New("limit must be between 1 and 1000")
+	}
+	const query = `WITH scoped AS (
+ SELECT logical_key, substr(logical_key,length(?)+1) AS rest FROM objects
+	WHERE bucket_id=? AND status='ready' AND logical_key>=? AND substr(logical_key,1,length(?))=? AND logical_key<>?
+), entries AS (
+ SELECT DISTINCT CASE WHEN instr(rest,'/')>0 THEN ? || substr(rest,1,instr(rest,'/')) ELSE logical_key END AS entry FROM scoped
+)
+SELECT entry FROM entries WHERE entry>? ORDER BY entry LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, query, prefix, bucketID, prefix, prefix, prefix, prefix, prefix, after, limit+1)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	var entries []ObjectEntry
+	for rows.Next() {
+		var key string
+		if err = rows.Scan(&key); err != nil {
+			return nil, "", err
+		}
+		entries = append(entries, ObjectEntry{Key: key, Folder: strings.HasSuffix(key, "/")})
+	}
+	if err = rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(entries) > limit {
+		next = entries[limit-1].Key
+		entries = entries[:limit]
+	}
+	ready := make([]ObjectEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Folder {
+			ready = append(ready, entry)
+			continue
+		}
+		object, getErr := s.GetObject(ctx, bucketID, entry.Key)
+		if getErr != nil {
+			if errors.Is(getErr, sql.ErrNoRows) {
+				continue
+			}
+			return nil, "", getErr
+		}
+		entry.Object = &object
+		ready = append(ready, entry)
+	}
+	return ready, next, nil
 }
 func (s *Store) CreatePublicLink(ctx context.Context, id, obj, slug string, ttl int64, expires *time.Time) error {
 	_, e := s.db.ExecContext(ctx, "INSERT INTO public_links(id,object_id,slug,sign_ttl_seconds,expires_at,created_at) VALUES(?,?,?,?,?,?)", id, obj, slug, ttl, expires, time.Now().UTC())
@@ -535,7 +607,7 @@ func (s *Store) PublicObject(ctx context.Context, slug string) (model.Object, in
 	var o model.Object
 	var ttl int64
 	var expiry sql.NullTime
-	e := s.db.QueryRowContext(ctx, `SELECT o.id,o.bucket_id,o.source_id,o.logical_key,o.physical_key,o.size,o.content_type,o.etag,o.status,o.generation,o.is_public,o.created_at,o.updated_at,l.sign_ttl_seconds,l.expires_at FROM public_links l JOIN objects o ON o.id=l.object_id WHERE l.slug=? AND l.revoked=0`, slug).Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt, &ttl, &expiry)
+	e := s.db.QueryRowContext(ctx, `SELECT o.id,o.bucket_id,o.source_id,o.logical_key,o.physical_key,o.size,o.content_type,o.etag,o.status,o.generation,o.is_public,o.created_at,o.updated_at,l.sign_ttl_seconds,l.expires_at FROM public_links l JOIN objects o ON o.id=l.object_id JOIN buckets b ON b.id=o.bucket_id WHERE l.slug=? AND l.revoked=0 AND b.visibility='public'`, slug).Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt, &ttl, &expiry)
 	if e == nil && expiry.Valid && time.Now().After(expiry.Time) {
 		return o, ttl, errors.New("link expired")
 	}

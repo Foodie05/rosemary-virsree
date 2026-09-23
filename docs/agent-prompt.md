@@ -18,7 +18,7 @@ Bootstrap Token 只能兑换一次。禁止把 Token、AK、SK、凭据文件内
 一、先检查应用，不要立即改代码
 1. 确认语言、框架、包管理器、运行方式和部署环境。
 2. 搜索已有文件上传、下载、本地磁盘、S3 SDK、对象 URL 和环境变量使用位置。
-3. 判断应用需要 read、write、delete、manage 中的哪些权限，不要扩大权限。
+3. 判断应用需要 read、write、delete、manage 中的哪些权限，不要扩大权限；需要稳定 /p/ 公开别名时虚拟桶选 public，否则选 private。
 4. 选择 3–63 位、全小写、只含字母数字和连字符的虚拟桶名。
 5. 确定生产 Secret 写入位置。优先 Kubernetes Secret、Vault 或云 Secret Manager；本地开发才使用 0600 env 文件。
 
@@ -67,7 +67,7 @@ Windows PowerShell：
     -name '<应用名称和环境>' \
     -bucket '<虚拟桶名>' \
     -quota '<字节数，不得超过 {{MAX_QUOTA_BYTES}}>' \
-    -visibility private \
+    -visibility '<private_or_public>' \
     -env-file '<部署 Secret 路径>'
 
 rvsctl 会创建虚拟桶，把 AWS_ENDPOINT_URL、AWS_REGION、AWS_ACCESS_KEY_ID、AWS_SECRET_ACCESS_KEY、AWS_S3_FORCE_PATH_STYLE 和 RVS_BUCKET 写入权限为 0600 的文件。它拒绝覆盖已有文件，也不会在终端显示 AK/SK。不要读取或打印该文件；只检查文件存在、权限正确、应用进程可以加载。
@@ -81,7 +81,7 @@ rvsctl 会创建虚拟桶，把 AWS_ENDPOINT_URL、AWS_REGION、AWS_ACCESS_KEY_I
    b. 把文件 PUT 到响应中的短期 url，并原样带上 required_headers。S3 来源时它是真实 S3 地址；WebDAV 来源时它是 VirSree 中转能力地址。不要记录或持久化该 URL。
    c. PUT 成功后 POST 响应中的 commit_url，提交 upload_id 和 key。只有 commit 成功才向业务层报告上传完成。
 5. 下载调用 POST {{GATEWAY}}/api/v1/buckets/{bucket}/objects/download，提交 key、可选 filename 和当前业务选择的 expires_in；检查响应 direct：true 表示真实 S3/CDN 直链；false 表示 WebDAV 中转能力地址。
-6. “公开链接”调用 .../objects/public-link 创建，也要明确提交 sign_expires_in，并保存返回的 slug；撤销时调用 DELETE .../public-links/{slug}。底层桶始终 Private。
+6. 只有虚拟桶设置为 public 模式时才能创建 /p/“公开链接”。调用 .../objects/public-link 创建，明确提交 sign_expires_in，并保存返回的 slug；撤销时调用 DELETE .../public-links/{slug}。切回 private 会立即停用已有 /p/ 链接，底层桶始终 Private。
 7. 每次签名都由当前业务场景选择有效期。平台没有业务默认值；必须是正整数，S3 SigV4 的协议上限为 604800 秒。
 8. 对网络错误做有限重试。真实 S3 PUT 成功但 commit 结果未知时，先按 API 文档核实，避免重复对象和预留空间。
 

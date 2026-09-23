@@ -1,6 +1,8 @@
 package s3compat
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"encoding/xml"
 	"net/http"
 	"strconv"
@@ -15,13 +17,15 @@ type Gateway struct{ svc *service.Service }
 func New(s *service.Service) *Gateway { return &Gateway{svc: s} }
 
 type listResult struct {
-	XMLName      xml.Name `xml:"ListBucketResult"`
-	Xmlns        string   `xml:"xmlns,attr"`
-	Name, Prefix string
-	KeyCount     int       `xml:"KeyCount"`
-	MaxKeys      int       `xml:"MaxKeys"`
-	IsTruncated  bool      `xml:"IsTruncated"`
-	Contents     []content `xml:"Contents"`
+	XMLName               xml.Name `xml:"ListBucketResult"`
+	Xmlns                 string   `xml:"xmlns,attr"`
+	Name, Prefix          string
+	KeyCount              int       `xml:"KeyCount"`
+	MaxKeys               int       `xml:"MaxKeys"`
+	IsTruncated           bool      `xml:"IsTruncated"`
+	ContinuationToken     string    `xml:"ContinuationToken,omitempty"`
+	NextContinuationToken string    `xml:"NextContinuationToken,omitempty"`
+	Contents              []content `xml:"Contents"`
 }
 type content struct {
 	Key          string `xml:"Key"`
@@ -87,12 +91,46 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 func (g *Gateway) list(w http.ResponseWriter, r *http.Request, c service.Credential) {
 	prefix := r.URL.Query().Get("prefix")
-	objs, e := g.svc.DB.ListObjects(r.Context(), c.Bucket.ID, prefix)
+	maxKeys := 1000
+	if raw := r.URL.Query().Get("max-keys"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			s3error(w, r, 400, "InvalidArgument", "max-keys 必须是非负整数。", "max-keys must be a non-negative integer.")
+			return
+		}
+		if parsed < maxKeys {
+			maxKeys = parsed
+		}
+	}
+	q := r.URL.Query()
+	after := q.Get("start-after")
+	if token := q.Get("continuation-token"); token != "" {
+		var cursor struct{ Bucket, Prefix, After string }
+		bytes, err := base64.RawURLEncoding.DecodeString(token)
+		if len(token) > 8192 || err != nil || json.Unmarshal(bytes, &cursor) != nil || cursor.Bucket != c.Bucket.ID || cursor.Prefix != prefix || cursor.After == "" {
+			s3error(w, r, 400, "InvalidToken", "分页令牌无效或与当前桶及前缀不匹配。", "The continuation token is invalid for this bucket and prefix.")
+			return
+		}
+		after = cursor.After
+	}
+	out := listResult{Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/", Name: c.Bucket.Slug, Prefix: prefix, MaxKeys: maxKeys, ContinuationToken: q.Get("continuation-token")}
+	if maxKeys == 0 {
+		w.Header().Set("Content-Type", "application/xml")
+		w.Write([]byte(xml.Header))
+		_ = xml.NewEncoder(w).Encode(out)
+		return
+	}
+	objs, next, e := g.svc.DB.ListObjectsPage(r.Context(), c.Bucket.ID, prefix, after, maxKeys)
 	if e != nil {
 		s3error(w, r, 500, "InternalError", "VirSree 暂时无法列出对象，请使用请求追踪编号排查。", "VirSree could not list objects. Use the request trace ID to investigate.")
 		return
 	}
-	out := listResult{Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/", Name: c.Bucket.Slug, Prefix: prefix, KeyCount: len(objs), MaxKeys: 1000}
+	out.KeyCount = len(objs)
+	out.IsTruncated = next != ""
+	if next != "" {
+		encoded, _ := json.Marshal(struct{ Bucket, Prefix, After string }{c.Bucket.ID, prefix, next})
+		out.NextContinuationToken = base64.RawURLEncoding.EncodeToString(encoded)
+	}
 	for _, o := range objs {
 		out.Contents = append(out.Contents, content{Key: o.LogicalKey, LastModified: o.UpdatedAt.UTC().Format(time.RFC3339), ETag: o.ETag, Size: o.Size, StorageClass: "STANDARD"})
 	}

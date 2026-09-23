@@ -356,6 +356,9 @@ func (s *Service) Delete(ctx context.Context, c Credential, key string) error {
 	return e
 }
 func (s *Service) NewPublicLink(ctx context.Context, c Credential, key string, signTTL, linkTTL int64) (string, string, string, error) {
+	if c.Bucket.Visibility != "public" {
+		return "", "", "", errors.New("public links require a public virtual bucket")
+	}
 	if signTTL < 1 {
 		return "", "", "", errors.New("sign_expires_in is required")
 	}

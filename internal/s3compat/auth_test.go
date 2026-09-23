@@ -6,11 +6,13 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"rosemary-virsree/internal/config"
+	"rosemary-virsree/internal/model"
 	"rosemary-virsree/internal/provider"
 	"rosemary-virsree/internal/secretbox"
 	"rosemary-virsree/internal/service"
@@ -68,6 +70,15 @@ func TestGoSDKHeaderSignedListObjectsV2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for i, objectKey := range []string{"a.txt", "b.txt", "c.txt"} {
+		o := model.Object{ID: "sdk-upload-" + objectKey, BucketID: bucket.ID, LogicalKey: objectKey, PhysicalKey: "sdk-physical-" + objectKey, Size: int64(i + 1), ContentType: "text/plain", CreatedAt: time.Now().UTC()}
+		if err = db.ReserveObject(ctx, o, time.Now().Add(time.Minute), 100, 10); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err = db.CommitUpload(ctx, o, "etag", o.Size); err != nil {
+			t.Fatal(err)
+		}
+	}
 	mux := http.NewServeMux()
 	mux.Handle("GET /s3/{bucket}", New(svc))
 	server := httptest.NewServer(mux)
@@ -91,5 +102,14 @@ func TestGoSDKHeaderSignedListObjectsV2(t *testing.T) {
 				t.Fatal("accepted a request after a signed header was changed")
 			}
 		})
+	}
+	client := awss3.NewFromConfig(aws.Config{Region: "us-east-1", Credentials: credentials.NewStaticCredentialsProvider(key.AK, secret, ""), HTTPClient: http.DefaultClient}, func(o *awss3.Options) { o.BaseEndpoint = aws.String(server.URL + "/s3"); o.UsePathStyle = true })
+	first, err := client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{Bucket: aws.String(bucket.Slug), MaxKeys: aws.Int32(2)})
+	if err != nil || len(first.Contents) != 2 || !aws.ToBool(first.IsTruncated) || aws.ToString(first.NextContinuationToken) == "" {
+		t.Fatalf("first page: %+v, %v", first, err)
+	}
+	second, err := client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{Bucket: aws.String(bucket.Slug), MaxKeys: aws.Int32(2), ContinuationToken: first.NextContinuationToken})
+	if err != nil || len(second.Contents) != 1 || aws.ToBool(second.IsTruncated) || aws.ToString(second.Contents[0].Key) != "c.txt" {
+		t.Fatalf("second page: %+v, %v", second, err)
 	}
 }
