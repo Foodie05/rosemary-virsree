@@ -85,6 +85,22 @@ func (s *Service) cleanupBuckets(ctx context.Context) {
 			_ = s.DB.BucketDeletionError(ctx, job.BucketID, "")
 		}
 	}
+	tombstones, err := s.DB.DueBucketCleanupTombstones(ctx)
+	if err != nil {
+		return
+	}
+	for _, t := range tombstones {
+		if ctx.Err() != nil {
+			return
+		}
+		work, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		err = s.sweepBucketNamespaces(work, t.BucketID, true)
+		cancel()
+		if err != nil {
+			slog.Warn("late bucket transfer cleanup incomplete", "bucket_id", t.BucketID, "code", "bucket_cleanup_failed")
+		}
+		_ = s.DB.UpdateBucketCleanupTombstone(ctx, t.BucketID, err == nil && !time.Now().Before(t.Until))
+	}
 }
 func (s *Service) cleanBucket(ctx context.Context, id string, after time.Time) error {
 	physicalSources, err := s.DB.BucketPhysicalSources(ctx, id)
@@ -105,6 +121,20 @@ func (s *Service) cleanBucket(ctx context.Context, id string, after time.Time) e
 			}
 		}
 	}
+	if err = s.sweepBucketNamespaces(ctx, id, false); err != nil {
+		return err
+	}
+	if time.Now().Before(after) {
+		return nil
+	}
+	if err = s.DB.FinishBucketDeletion(ctx, id); err != nil {
+		return err
+	}
+	s.DB.Audit(ctx, "bucket.deleted", id, "objects, upload grants, links, credentials and quotas cleaned")
+	slog.Info("bucket cleanup completed", "bucket_id", id)
+	return nil
+}
+func (s *Service) sweepBucketNamespaces(ctx context.Context, id string, stagingOnly bool) error {
 	sources, err := s.Storage.List(ctx)
 	if err != nil {
 		return err
@@ -124,7 +154,7 @@ func (s *Service) cleanBucket(ctx context.Context, id string, after time.Time) e
 		backends = append(backends, s.Storage.legacy)
 	}
 	// Missing all sources must not turn a nonempty bucket into false success.
-	if len(backends) == 0 {
+	if len(backends) == 0 && !stagingOnly {
 		metrics, e := s.DB.BucketMetrics(ctx, id)
 		if e != nil {
 			return e
@@ -133,21 +163,17 @@ func (s *Service) cleanBucket(ctx context.Context, id string, after time.Time) e
 			return errors.New("no storage source for bucket cleanup")
 		}
 	}
+	prefixes := []string{"rosemary/" + id + "/", "rosemary-staging/" + id + "/"}
+	if stagingOnly {
+		prefixes = prefixes[1:]
+	}
 	for _, backend := range backends {
-		for _, prefix := range []string{"rosemary/" + id + "/", "rosemary-staging/" + id + "/"} {
+		for _, prefix := range prefixes {
 			if err = backend.PurgePrefix(ctx, prefix); err != nil {
 				return err
 			}
 		}
 	}
-	if time.Now().Before(after) {
-		return nil
-	}
-	if err = s.DB.FinishBucketDeletion(ctx, id); err != nil {
-		return err
-	}
-	s.DB.Audit(ctx, "bucket.deleted", id, "objects, upload grants, links, credentials and quotas cleaned")
-	slog.Info("bucket cleanup completed", "bucket_id", id)
 	return nil
 }
 

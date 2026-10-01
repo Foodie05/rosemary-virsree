@@ -252,7 +252,11 @@ func (s *Server) createBucket(w http.ResponseWriter, r *http.Request) {
 func (s *Server) bucketDetail(w http.ResponseWriter, r *http.Request) {
 	v, err := s.svc.BucketDetail(r.Context(), r.PathValue("bucket"))
 	if err != nil {
-		fail(w, r, http.StatusNotFound, "virtual bucket not found")
+		if service.IsNotFound(err) {
+			fail(w, r, http.StatusNotFound, "virtual bucket not found")
+		} else {
+			fail(w, r, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	write(w, http.StatusOK, v)

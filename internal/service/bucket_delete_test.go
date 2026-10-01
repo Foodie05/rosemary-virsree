@@ -126,6 +126,14 @@ func TestBucketCleanupRetriesAndPurgesOrphansAcrossSources(t *testing.T) {
 		}
 	}
 	svc.cleanupBuckets(ctx) // Completed work does not run again or alter accounting.
+	// A PUT started before expiry may finish after the bucket metadata is gone.
+	a.objects["rosemary-staging/"+bucket.ID+"/late-completion/file"] = []byte("late")
+	if err = svc.sweepBucketNamespaces(ctx, bucket.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.objects) != 2 || string(a.objects["rosemary/other/g1/keep"]) != "other" {
+		t.Fatal("late-transfer cleanup failed or affected another bucket")
+	}
 }
 
 func TestDeletionAcceptsImmediatelyButCleanupWaitsForInflightOperation(t *testing.T) {

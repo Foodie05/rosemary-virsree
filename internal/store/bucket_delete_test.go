@@ -98,6 +98,22 @@ func TestBucketDeletionWaitCleanupAndIsolation(t *testing.T) {
 	if err = db.FinishBucketDeletion(ctx, "target"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = db.db.Exec(`UPDATE bucket_cleanup_tombstones SET next_at=? WHERE bucket_id='target'`, now.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	tombstones, err := db.DueBucketCleanupTombstones(ctx)
+	if err != nil || len(tombstones) != 1 || tombstones[0].BucketID != "target" {
+		t.Fatalf("late upload sweep not scheduled: %+v %v", tombstones, err)
+	}
+	if err = db.UpdateBucketCleanupTombstone(ctx, "target", false); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := db.DueBucketCleanupTombstones(ctx); err != nil || len(due) != 0 {
+		t.Fatalf("follow-up was not delayed: %+v %v", due, err)
+	}
+	if err = db.UpdateBucketCleanupTombstone(ctx, "target", true); err != nil {
+		t.Fatal(err)
+	}
 	for _, table := range []string{"buckets", "objects", "uploads", "upload_grants", "access_keys", "public_links", "transfer_tokens", "bucket_deletions", "bucket_delete_confirmations"} {
 		var count int
 		if err = db.db.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {

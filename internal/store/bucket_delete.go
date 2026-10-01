@@ -135,6 +135,12 @@ func (s *Store) FinishBucketDeletion(ctx context.Context, id string) error {
 	if time.Now().Before(after) {
 		return errors.New("bucket upload grants have not expired")
 	}
+	// S3 checks the PUT signature when a request starts, not when its body ends.
+	// Retain only the opaque namespace ID for a week of late-transfer sweeps.
+	now := time.Now().UTC()
+	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO bucket_cleanup_tombstones(bucket_id,until_at,next_at) VALUES(?,?,?)`, id, now.Add(7*24*time.Hour), now.Add(15*time.Minute)); err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, `UPDATE storage_sources SET
 	 used_bytes=MAX(0,used_bytes-COALESCE((SELECT sum(size) FROM objects WHERE bucket_id=? AND source_id=storage_sources.id AND status='ready'),0)),
 	 reserved_bytes=MAX(0,reserved_bytes-COALESCE((SELECT sum(source_reserved_bytes) FROM uploads WHERE bucket_id=? AND source_id=storage_sources.id),0))`, id, id); err != nil {
@@ -153,6 +159,36 @@ func (s *Store) FinishBucketDeletion(ctx context.Context, id string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+type BucketCleanupTombstone struct {
+	BucketID string
+	Until    time.Time
+}
+
+func (s *Store) DueBucketCleanupTombstones(ctx context.Context) ([]BucketCleanupTombstone, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT bucket_id,until_at FROM bucket_cleanup_tombstones WHERE next_at<=? ORDER BY next_at LIMIT 50`, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BucketCleanupTombstone
+	for rows.Next() {
+		var v BucketCleanupTombstone
+		if err = rows.Scan(&v.BucketID, &v.Until); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+func (s *Store) UpdateBucketCleanupTombstone(ctx context.Context, id string, finished bool) error {
+	if finished {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM bucket_cleanup_tombstones WHERE bucket_id=?`, id)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE bucket_cleanup_tombstones SET next_at=? WHERE bucket_id=?`, time.Now().UTC().Add(15*time.Minute), id)
+	return err
 }
 
 func (s *Store) PrepareBucketDeletion(ctx context.Context, id, hash string, ready, expires time.Time) error {

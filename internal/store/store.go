@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY,email TEXT
 CREATE TABLE IF NOT EXISTS transfer_tokens(token_hash TEXT PRIMARY KEY,object_id TEXT NOT NULL,source_id TEXT NOT NULL DEFAULT '',physical_key TEXT NOT NULL DEFAULT '',size INTEGER NOT NULL DEFAULT 0,content_type TEXT NOT NULL DEFAULT '',etag TEXT NOT NULL DEFAULT '',mode TEXT NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL,FOREIGN KEY(object_id) REFERENCES objects(id));
 CREATE TABLE IF NOT EXISTS bucket_deletions(bucket_id TEXT PRIMARY KEY,requested_at DATETIME NOT NULL,cleanup_after DATETIME NOT NULL,last_error_code TEXT NOT NULL DEFAULT '',FOREIGN KEY(bucket_id) REFERENCES buckets(id));
 CREATE TABLE IF NOT EXISTS bucket_delete_confirmations(token_hash TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,ready_at DATETIME NOT NULL,expires_at DATETIME NOT NULL,FOREIGN KEY(bucket_id) REFERENCES buckets(id));
+CREATE TABLE IF NOT EXISTS bucket_cleanup_tombstones(bucket_id TEXT PRIMARY KEY,until_at DATETIME NOT NULL,next_at DATETIME NOT NULL);
 CREATE TABLE IF NOT EXISTS upload_grants(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,expires_at DATETIME NOT NULL,FOREIGN KEY(bucket_id) REFERENCES buckets(id));
 CREATE INDEX IF NOT EXISTS objects_bucket ON objects(bucket_id,status);
 CREATE INDEX IF NOT EXISTS objects_bucket_key ON objects(bucket_id,status,logical_key);
