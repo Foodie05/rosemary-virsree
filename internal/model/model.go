@@ -3,6 +3,7 @@ package model
 import "time"
 
 type Bucket struct {
+	Deleting       bool      `json:"deleting"`
 	ID             string    `json:"id"`
 	Name           string    `json:"name"`
 	Slug           string    `json:"slug"`

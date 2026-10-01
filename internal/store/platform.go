@@ -116,7 +116,7 @@ func (s *Store) SetUploadTransferHash(ctx context.Context, id, hash string) erro
 func (s *Store) UploadByTransferHash(ctx context.Context, hash string) (model.Object, time.Time, error) {
 	var o model.Object
 	var exp time.Time
-	e := s.db.QueryRowContext(ctx, `SELECT id,bucket_id,source_id,logical_key,physical_key,size,content_type,created_at,expires_at FROM uploads WHERE transfer_hash=?`, hash).Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.CreatedAt, &exp)
+	e := s.db.QueryRowContext(ctx, `SELECT id,bucket_id,source_id,logical_key,physical_key,size,content_type,created_at,expires_at FROM uploads WHERE transfer_hash=? AND NOT EXISTS(SELECT 1 FROM bucket_deletions d WHERE d.bucket_id=uploads.bucket_id)`, hash).Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.CreatedAt, &exp)
 	return o, exp, e
 }
 func (s *Store) CreateDownloadToken(ctx context.Context, hash, objectID string, expires time.Time) error {
@@ -127,6 +127,6 @@ func (s *Store) CreateDownloadToken(ctx context.Context, hash, objectID string, 
 func (s *Store) DownloadByTransferHash(ctx context.Context, hash string) (model.Object, time.Time, error) {
 	var o model.Object
 	var exp time.Time
-	e := s.db.QueryRowContext(ctx, `SELECT o.id,o.bucket_id,COALESCE(NULLIF(t.source_id,''),o.source_id),o.logical_key,COALESCE(NULLIF(t.physical_key,''),o.physical_key),CASE WHEN t.physical_key='' THEN o.size ELSE t.size END,CASE WHEN t.physical_key='' THEN o.content_type ELSE t.content_type END,CASE WHEN t.physical_key='' THEN o.etag ELSE t.etag END,o.status,o.generation,o.is_public,o.created_at,o.updated_at,t.expires_at FROM transfer_tokens t JOIN objects o ON o.id=t.object_id WHERE t.token_hash=? AND t.mode='download'`, hash).Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt, &exp)
+	e := s.db.QueryRowContext(ctx, `SELECT o.id,o.bucket_id,COALESCE(NULLIF(t.source_id,''),o.source_id),o.logical_key,COALESCE(NULLIF(t.physical_key,''),o.physical_key),CASE WHEN t.physical_key='' THEN o.size ELSE t.size END,CASE WHEN t.physical_key='' THEN o.content_type ELSE t.content_type END,CASE WHEN t.physical_key='' THEN o.etag ELSE t.etag END,o.status,o.generation,o.is_public,o.created_at,o.updated_at,t.expires_at FROM transfer_tokens t JOIN objects o ON o.id=t.object_id WHERE t.token_hash=? AND t.mode='download' AND NOT EXISTS(SELECT 1 FROM bucket_deletions d WHERE d.bucket_id=o.bucket_id)`, hash).Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt, &exp)
 	return o, exp, e
 }

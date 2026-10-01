@@ -9,6 +9,7 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"rosemary-virsree/internal/config"
@@ -21,11 +22,12 @@ import (
 var slugRx = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
 
 type Service struct {
-	DB         *store.Store
-	Storage    *StorageManager
-	Box        *secretbox.Box
-	Config     config.Config
-	PlatformFS *PlatformFilesystem
+	bucketLocks sync.Map
+	DB          *store.Store
+	Storage     *StorageManager
+	Box         *secretbox.Box
+	Config      config.Config
+	PlatformFS  *PlatformFilesystem
 }
 type Credential struct {
 	AccessKey, SecretKey string `json:"-"`
@@ -90,8 +92,18 @@ func (s *Service) BucketDetail(ctx context.Context, slug string) (map[string]any
 	if region == "" {
 		region = "us-east-1"
 	}
+	status := map[bool]string{true: "ready", false: "storage_unavailable"}[s.Storage.Ready()]
+	var deletion *store.BucketDeletion
+	if b.Deleting {
+		status = "deleting"
+		d, e := s.DB.BucketDeletion(ctx, b.ID)
+		if e != nil {
+			return nil, e
+		}
+		deletion = &d
+	}
 	return map[string]any{
-		"bucket": b, "status": map[bool]string{true: "ready", false: "storage_unavailable"}[s.Storage.Ready()],
+		"bucket": b, "status": status, "deletion": deletion,
 		"s3_endpoint": s.Config.PublicURL + "/s3", "api_endpoint": s.Config.PublicURL + "/api/v1/buckets/" + b.Slug,
 		"region": region, "can_set_unlimited": s.Storage.PrimaryUnlimited(), "metrics": metrics, "allocations": allocations,
 	}, nil
@@ -203,6 +215,11 @@ func stagingPhysical(b model.Bucket, uploadID, key string) string {
 	return fmt.Sprintf("rosemary-staging/%s/%s/%s", b.ID, uploadID, strings.TrimPrefix(key, "/"))
 }
 func (s *Service) BeginUpload(ctx context.Context, c Credential, key, contentType string, size, expires int64) (model.Object, string, error) {
+	unlock, err := s.BucketOperation(ctx, c.Bucket.ID)
+	if err != nil {
+		return model.Object{}, "", err
+	}
+	defer unlock()
 	if size < 0 {
 		return model.Object{}, "", errors.New("size is required")
 	}
@@ -241,7 +258,9 @@ func (s *Service) BeginUpload(ctx context.Context, c Credential, key, contentTyp
 		u = s.Config.PublicURL + "/transfer/upload/" + token
 	}
 	if e != nil {
-		_ = s.DB.CancelUpload(ctx, o.ID)
+		if s.DB.CancelUpload(ctx, o.ID) == nil {
+			s.DB.ForgetUploadGrant(ctx, o.ID)
+		}
 		return o, "", e
 	}
 	s.DB.Audit(ctx, "upload.signed", c.Bucket.Slug, o.LogicalKey)
@@ -249,6 +268,7 @@ func (s *Service) BeginUpload(ctx context.Context, c Credential, key, contentTyp
 }
 
 func (s *Service) cleanupExpiredUploads(ctx context.Context) {
+	s.DB.PruneUploadGrants(ctx)
 	uploads, err := s.DB.ExpiredUploads(ctx, 100)
 	if err != nil {
 		return
@@ -265,6 +285,11 @@ func (s *Service) cleanupExpiredUploads(ctx context.Context) {
 	}
 }
 func (s *Service) CommitUpload(ctx context.Context, c Credential, id, key string) (model.Object, error) {
+	unlock, err := s.BucketOperation(ctx, c.Bucket.ID)
+	if err != nil {
+		return model.Object{}, err
+	}
+	defer unlock()
 	o, e := s.DB.GetUpload(ctx, c.Bucket.ID, id, key)
 	if e != nil {
 		return o, e
@@ -314,6 +339,11 @@ func (s *Service) CommitUpload(ctx context.Context, c Credential, id, key string
 	return o, e
 }
 func (s *Service) DownloadURL(ctx context.Context, c Credential, key string, expires int64, filename string) (string, error) {
+	unlock, err := s.BucketOperation(ctx, c.Bucket.ID)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	if expires < 1 {
 		return "", errors.New("expires_in is required")
 	}
@@ -338,6 +368,11 @@ func (s *Service) DownloadURL(ctx context.Context, c Credential, key string, exp
 	return s.Config.PublicURL + "/transfer/download/" + token, nil
 }
 func (s *Service) Delete(ctx context.Context, c Credential, key string) error {
+	unlock, err := s.BucketOperation(ctx, c.Bucket.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	o, e := s.DB.GetObject(ctx, c.Bucket.ID, key)
 	if e != nil {
 		return e
@@ -356,6 +391,11 @@ func (s *Service) Delete(ctx context.Context, c Credential, key string) error {
 	return e
 }
 func (s *Service) NewPublicLink(ctx context.Context, c Credential, key string, signTTL, linkTTL int64) (string, string, string, error) {
+	unlock, err := s.BucketOperation(ctx, c.Bucket.ID)
+	if err != nil {
+		return "", "", "", err
+	}
+	defer unlock()
 	if c.Bucket.Visibility != "public" {
 		return "", "", "", errors.New("public links require a public virtual bucket")
 	}
@@ -411,6 +451,11 @@ func (s *Service) ResolvePublic(ctx context.Context, slug string) (string, error
 	if e != nil {
 		return "", e
 	}
+	unlock, err := s.BucketOperation(ctx, o.BucketID)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	b, e := s.Storage.backend(o.SourceID)
 	if e != nil {
 		return "", e
@@ -425,6 +470,15 @@ func (s *Service) ResolvePublic(ctx context.Context, slug string) (string, error
 	return s.Config.PublicURL + "/transfer/download/" + token, nil
 }
 func (s *Service) RelayUpload(ctx context.Context, token string, body io.Reader, size int64) error {
+	o, _, err := s.DB.UploadByTransferHash(ctx, secretbox.Hash(token))
+	if err != nil {
+		return err
+	}
+	unlock, err := s.BucketOperation(ctx, o.BucketID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return s.Storage.relayUpload(ctx, token, body, size)
 }
 func (s *Service) RelayDownload(ctx context.Context, token string) (io.ReadCloser, provider.Head, error) {

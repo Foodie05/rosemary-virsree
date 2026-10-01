@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,4 +96,13 @@ func TestPlatformFilesystemWritesDecryptableRollingSnapshot(t *testing.T) {
 	if !fs.Status().Initialized {
 		t.Fatal("filesystem status was not updated")
 	}
+}
+
+func (m *memoryBackend) PurgePrefix(_ context.Context, prefix string) error {
+	for key := range m.objects {
+		if strings.HasPrefix(key, prefix) {
+			delete(m.objects, key)
+		}
+	}
+	return nil
 }

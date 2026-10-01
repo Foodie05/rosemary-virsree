@@ -143,3 +143,7 @@ docker build -t rosemary-virsree .
 Persist the SQLite database and `RVS_MASTER_KEY`. Changing the master key makes stored virtual secrets unreadable. Put the gateway behind TLS in production. The S3 endpoint named by `RVS_S3_PUBLIC_ENDPOINT` must be reachable by applications because signed object traffic goes there directly.
 
 SQLite is intended for a single gateway replica. Before horizontal scaling, move the store implementation to a transactional shared database and retain the same reservation and logical-key uniqueness rules.
+
+### Delete a virtual bucket
+
+Open the bucket management page and choose **删除桶**. VirSree requires a custom consequence warning, a server-enforced five-second wait, and an exact full S3 bucket name before accepting permanent deletion. Cleanup runs durably in the background: it disables access, sweeps the bucket's final/staging namespaces across S3 and WebDAV sources, removes metadata/credentials/links, and releases capacity only after successful cleanup. Failed cleanup retries automatically; outstanding direct PUT signatures keep the bucket in a visible cleanup state until their expiry and final sweep. See [deletion semantics and API](docs/api.md#permanently-deleting-a-virtual-bucket), including historical S3 versions, CDN caches and backup retention.

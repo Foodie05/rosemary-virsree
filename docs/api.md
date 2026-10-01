@@ -42,6 +42,9 @@ The `/s3` routes use AWS Signature Version 4 with the virtual AK/SK. Permissions
 | `PUT` | `/api/v1/storage-sources/{id}` | Revalidate and atomically replace a storage source |
 | `GET` | `/api/v1/buckets` | List virtual buckets and usage |
 | `POST` | `/api/v1/buckets` | Create a virtual bucket and one-time owner credential |
+| `GET` / `PUT` | `/api/v1/admin/buckets/{bucket}` | Inspect or edit a virtual bucket |
+| `POST` | `/api/v1/admin/buckets/{bucket}/deletion-confirmation` | Issue a bucket-bound, one-use deletion confirmation with a five-second server wait |
+| `DELETE` | `/api/v1/admin/buckets/{bucket}` | Confirm and queue permanent bucket cleanup |
 | `GET` | `/api/v1/access-keys` | List key metadata without secrets |
 | `POST` | `/api/v1/buckets/{bucket}/access-keys` | Issue a key with selected permissions; return its secret once |
 | `DELETE` | `/api/v1/access-keys/{id}` | Revoke a virtual key |
@@ -133,3 +136,19 @@ For the administrative object browser, `browse=1&limit=40&prefix=images/&after=<
 ## Central gateway invariant
 
 Applications only need the gateway origin. All authentication, policy, metadata, signing, quota, onboarding and link management enter that origin. For S3 sources, a successful signing response hands object bytes to the S3 direct/CDN endpoint. WebDAV has no generic presign standard and uses a short-lived relay capability instead.
+
+## Permanently deleting a virtual bucket
+
+In the console, open **虚拟桶 → 管理 → 删除桶**. The custom warning dialog explains the scope and disables confirmation for five seconds. The next dialog requires the complete **S3 bucket name** (`slug`), not the editable display name. Case and whitespace must match exactly. Canceling either step leaves the bucket unchanged.
+
+For administrator automation:
+
+1. `POST /api/v1/admin/buckets/{bucket}/deletion-confirmation` with `{}`. Save `confirmation_token` only in memory. The response includes `ready_at` and `wait_seconds: 5`.
+2. Wait the full five seconds. `DELETE /api/v1/admin/buckets/{bucket}` with `{"confirm_name":"exact-bucket-slug","confirmation_token":"..."}`. The confirmation is bound to that bucket, expires after 15 minutes, and is consumed once. The server verifies the wait and exact name.
+3. HTTP **202** means cleanup was accepted, **not completed**. Poll `GET /api/v1/admin/buckets/{bucket}`: `status: "deleting"` and `deletion` show the persisted job, upload-grant deadline and stable error code. A 404 means the cleanup finished and the bucket record was removed. The console polls automatically and returns to the bucket list on completion.
+
+At acceptance, keys and public aliases are revoked and new signing, uploads, commits, edits and key creation are blocked. Background cleanup sweeps both `rosemary/{bucket_id}/` and `rosemary-staging/{bucket_id}/` across every configured source, including disabled sources, removing untracked staging files and superseded keys as well as mapped objects. S3 sources are also swept for historical versions and delete markers; an explicitly unsupported version API falls back to ordinary object listing. Source credentials need list and delete permissions, plus `ListBucketVersions` and `DeleteObjectVersion` if the provider supports versioning. Object Lock, retention policies, permission denials and WebDAV partial failures leave the job incomplete for automatic retry; no success is reported and metadata is retained.
+
+A direct PUT signature can still write its staging key after commit. VirSree therefore retains upload-grant receipts, sweeps while those signatures remain valid, and performs final cleanup after the last expiry plus a 60-second transfer grace period. During upgrade from releases without receipts, recently signed uploads conservatively use the seven-day SigV4 upper bound from their audit timestamp. New signatures retain their exact application-selected expiry. Jobs resume after service restart or browser disconnection.
+
+Only after all source sweeps succeed does one database transaction remove objects, upload reservations and grants, transfer tokens, public links, virtual credentials, confirmation records and the bucket; it also releases each source's used/reserved accounting and the bucket's allocated quota. Other virtual buckets, physical buckets/collections and `virsree-system/` backups remain intact. Audit records remain as an operation history. Previously downloaded copies, CDN caches, provider recovery facilities and encrypted rolling backup snapshots are outside the live bucket cleanup: refresh CDN caches at the provider, and let snapshots rotate under the configured retention policy. This is operational deletion, not a guarantee of forensic erasure.

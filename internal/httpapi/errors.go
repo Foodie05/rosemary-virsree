@@ -18,6 +18,15 @@ type localizedError struct {
 func errorFor(raw string, status int) localizedError {
 	message := strings.ToLower(raw)
 	switch {
+	case strings.Contains(message, "bucket name confirmation does not match"):
+		return localizedError{"bucket_name_mismatch", "桶名不匹配。请完整输入桶的 S3 名称，大小写和空格必须完全一致。", "The bucket name does not match. Enter the full S3 bucket name exactly, including case and whitespace."}
+	case strings.Contains(message, "bucket deletion confirmation wait"):
+		return localizedError{"bucket_delete_wait", "请先阅读删除后果并等待满 5 秒。", "Read the consequences and wait the full five seconds before confirming deletion."}
+	case strings.Contains(message, "bucket deletion confirmation"):
+		return localizedError{"bucket_delete_confirmation_invalid", "删除确认已失效，请重新打开删除弹窗。", "The deletion confirmation is invalid or expired. Reopen the deletion dialog."}
+	case strings.Contains(message, "bucket deletion in progress"):
+		return localizedError{"bucket_deleting", "此桶正在删除，已停止访问和修改。清理失败会自动重试。", "This bucket is being deleted. Access and changes are disabled; failed cleanup will retry automatically."}
+
 	case strings.Contains(message, "bucket change requires acknowledge_bucket_change"):
 		return localizedError{"storage_bucket_change_unacknowledged", "更换真实存储桶前必须确认数据可用性风险。请检查迁移计划并明确提交风险确认。", "Changing the physical bucket requires an explicit data-availability risk acknowledgement. Review the migration plan and submit the acknowledgement."}
 	case strings.Contains(message, "storage source kind cannot be changed"):

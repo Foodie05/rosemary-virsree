@@ -8,6 +8,11 @@ import (
 // RotateObjectKey copies an object to a fresh opaque physical key and deletes
 // the old one. Previously issued direct S3 URLs then fail even before expiry.
 func (s *Service) RotateObjectKey(ctx context.Context, c Credential, key string) error {
+	unlock, err := s.BucketOperation(ctx, c.Bucket.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	o, err := s.DB.GetObject(ctx, c.Bucket.ID, key)
 	if err != nil {
 		return err

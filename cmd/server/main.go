@@ -43,6 +43,7 @@ func main() {
 	appCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 	go svc.PlatformFS.Run(appCtx)
+	go svc.RunBucketCleanup(appCtx)
 	server := &http.Server{Addr: cfg.Listen, Handler: httpapi.New(svc).Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
 	go func() {
 		slog.Info("VirSree gateway ready", "listen", cfg.Listen, "public_url", cfg.PublicURL, "backend_ready", cfg.BackendReady(), "version", buildinfo.NormalizedVersion(), "commit", buildinfo.Commit)

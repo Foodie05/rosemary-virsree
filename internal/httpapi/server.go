@@ -81,6 +81,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/buckets", s.admin(s.buckets))
 	s.mux.HandleFunc("GET /api/v1/admin/buckets/{bucket}", s.admin(s.bucketDetail))
 	s.mux.HandleFunc("PUT /api/v1/admin/buckets/{bucket}", s.admin(s.updateBucket))
+	s.mux.HandleFunc("POST /api/v1/admin/buckets/{bucket}/deletion-confirmation", s.admin(s.prepareBucketDeletion))
+	s.mux.HandleFunc("DELETE /api/v1/admin/buckets/{bucket}", s.admin(s.deleteBucket))
 	s.mux.HandleFunc("GET /api/v1/platform-filesystem", s.admin(s.platformFilesystem))
 	s.mux.HandleFunc("GET /api/v1/access-keys", s.admin(s.keys))
 	s.mux.HandleFunc("POST /api/v1/bootstrap-tokens", s.admin(s.bootstrap))
@@ -614,4 +616,32 @@ func (s *Server) log(next http.Handler) http.Handler {
 		}
 		slog.Info("request", attrs...)
 	})
+}
+
+func (s *Server) prepareBucketDeletion(w http.ResponseWriter, r *http.Request) {
+	token, ready, err := s.svc.PrepareBucketDeletion(r.Context(), r.PathValue("bucket"))
+	if err != nil {
+		fail(w, r, 404, "virtual bucket not found")
+		return
+	}
+	write(w, 200, map[string]any{"confirmation_token": token, "wait_seconds": 5, "ready_at": ready})
+}
+func (s *Server) deleteBucket(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name  string `json:"confirm_name"`
+		Token string `json:"confirmation_token"`
+	}
+	if err := decode(r, &in); err != nil {
+		fail(w, r, 400, err.Error())
+		return
+	}
+	if err := s.svc.DeleteBucket(r.Context(), r.PathValue("bucket"), in.Name, in.Token); err != nil {
+		status := http.StatusConflict
+		if service.IsNotFound(err) {
+			status = 404
+		}
+		fail(w, r, status, err.Error())
+		return
+	}
+	write(w, http.StatusAccepted, map[string]any{"status": "deleting", "accepted": true})
 }

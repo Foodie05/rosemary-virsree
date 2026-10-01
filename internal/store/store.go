@@ -38,6 +38,10 @@ func Open(path string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) migrate() error {
+	var grantsExisted int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='upload_grants'`).Scan(&grantsExisted); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS buckets(id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT NOT NULL UNIQUE,visibility TEXT NOT NULL DEFAULT 'private',quota_bytes INTEGER NOT NULL,quota_unlimited INTEGER NOT NULL DEFAULT 0,used_bytes INTEGER NOT NULL DEFAULT 0,reserved_bytes INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL);
 CREATE TABLE IF NOT EXISTS access_keys(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,name TEXT NOT NULL,ak TEXT NOT NULL UNIQUE,secret_cipher TEXT NOT NULL,permissions TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0,created_at DATETIME NOT NULL,last_used_at DATETIME,FOREIGN KEY(bucket_id) REFERENCES buckets(id));
@@ -50,11 +54,16 @@ CREATE TABLE IF NOT EXISTS audits(id INTEGER PRIMARY KEY AUTOINCREMENT,action TE
 CREATE TABLE IF NOT EXISTS oidc_challenges(state_hash TEXT PRIMARY KEY,nonce TEXT NOT NULL,verifier TEXT NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL);
 CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY,email TEXT NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL);
 CREATE TABLE IF NOT EXISTS transfer_tokens(token_hash TEXT PRIMARY KEY,object_id TEXT NOT NULL,source_id TEXT NOT NULL DEFAULT '',physical_key TEXT NOT NULL DEFAULT '',size INTEGER NOT NULL DEFAULT 0,content_type TEXT NOT NULL DEFAULT '',etag TEXT NOT NULL DEFAULT '',mode TEXT NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL,FOREIGN KEY(object_id) REFERENCES objects(id));
+CREATE TABLE IF NOT EXISTS bucket_deletions(bucket_id TEXT PRIMARY KEY,requested_at DATETIME NOT NULL,cleanup_after DATETIME NOT NULL,last_error_code TEXT NOT NULL DEFAULT '',FOREIGN KEY(bucket_id) REFERENCES buckets(id));
+CREATE TABLE IF NOT EXISTS bucket_delete_confirmations(token_hash TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,ready_at DATETIME NOT NULL,expires_at DATETIME NOT NULL,FOREIGN KEY(bucket_id) REFERENCES buckets(id));
+CREATE TABLE IF NOT EXISTS upload_grants(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,expires_at DATETIME NOT NULL,FOREIGN KEY(bucket_id) REFERENCES buckets(id));
 CREATE INDEX IF NOT EXISTS objects_bucket ON objects(bucket_id,status);
 CREATE INDEX IF NOT EXISTS objects_bucket_key ON objects(bucket_id,status,logical_key);
 CREATE INDEX IF NOT EXISTS uploads_expiry ON uploads(expires_at);
 CREATE INDEX IF NOT EXISTS links_slug ON public_links(slug,revoked);
 CREATE INDEX IF NOT EXISTS sources_priority ON storage_sources(enabled,priority);
+CREATE INDEX IF NOT EXISTS upload_grants_bucket ON upload_grants(bucket_id,expires_at);
+CREATE INDEX IF NOT EXISTS confirmations_expiry ON bucket_delete_confirmations(expires_at);
 `)
 	if err != nil {
 		return err
@@ -76,7 +85,46 @@ CREATE INDEX IF NOT EXISTS sources_priority ON storage_sources(enabled,priority)
 			return e
 		}
 	}
-	return nil
+	_, err = s.db.Exec(`INSERT OR IGNORE INTO upload_grants(id,bucket_id,expires_at) SELECT id,bucket_id,expires_at FROM uploads`)
+	if err != nil {
+		return err
+	}
+	if grantsExisted == 0 {
+		// Releases before upload receipts did not retain committed PUT expiries.
+		// Use the SigV4 upper bound for recently issued legacy URLs, once only.
+		rows, e := s.db.Query(`SELECT b.id,a.created_at FROM buckets b JOIN audits a ON a.subject=b.slug AND a.action='upload.signed' WHERE a.created_at=(SELECT max(x.created_at) FROM audits x WHERE x.subject=b.slug AND x.action='upload.signed')`)
+		if e != nil {
+			return e
+		}
+		type grant struct {
+			id      string
+			expires time.Time
+		}
+		var grants []grant
+		for rows.Next() {
+			var id string
+			var at time.Time
+			if e = rows.Scan(&id, &at); e != nil {
+				rows.Close()
+				return e
+			}
+			expiry := at.Add(7 * 24 * time.Hour)
+			if expiry.Add(time.Minute).After(time.Now()) {
+				grants = append(grants, grant{id, expiry})
+			}
+		}
+		e = rows.Err()
+		rows.Close()
+		if e != nil {
+			return e
+		}
+		for _, g := range grants {
+			if _, e = s.db.Exec(`INSERT OR IGNORE INTO upload_grants(id,bucket_id,expires_at) VALUES(?,?,?)`, "legacy_"+g.id, g.id, g.expires); e != nil {
+				return e
+			}
+		}
+	}
+	return err
 }
 
 func (s *Store) Audit(ctx context.Context, action, subject, detail string) {
@@ -89,7 +137,7 @@ func (s *Store) Overview(ctx context.Context) (map[string]any, error) {
 	return map[string]any{"bucket_count": buckets, "object_count": objects, "active_key_count": keys, "used_bytes": used, "reserved_bytes": reserved, "allocated_quota": quota}, err
 }
 func (s *Store) ListBuckets(ctx context.Context) ([]model.Bucket, error) {
-	rows, e := s.db.QueryContext(ctx, "SELECT id,name,slug,visibility,quota_bytes,quota_unlimited,used_bytes,reserved_bytes,created_at FROM buckets ORDER BY created_at DESC")
+	rows, e := s.db.QueryContext(ctx, "SELECT id,name,slug,visibility,quota_bytes,quota_unlimited,used_bytes,reserved_bytes,created_at,EXISTS(SELECT 1 FROM bucket_deletions d WHERE d.bucket_id=buckets.id) FROM buckets ORDER BY created_at DESC")
 	if e != nil {
 		return nil, e
 	}
@@ -97,7 +145,7 @@ func (s *Store) ListBuckets(ctx context.Context) ([]model.Bucket, error) {
 	var out []model.Bucket
 	for rows.Next() {
 		var b model.Bucket
-		if e = rows.Scan(&b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.QuotaUnlimited, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt); e != nil {
+		if e = rows.Scan(&b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.QuotaUnlimited, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt, &b.Deleting); e != nil {
 			return nil, e
 		}
 		out = append(out, b)
@@ -106,7 +154,7 @@ func (s *Store) ListBuckets(ctx context.Context) ([]model.Bucket, error) {
 }
 func (s *Store) GetBucket(ctx context.Context, slug string) (model.Bucket, error) {
 	var b model.Bucket
-	e := s.db.QueryRowContext(ctx, "SELECT id,name,slug,visibility,quota_bytes,quota_unlimited,used_bytes,reserved_bytes,created_at FROM buckets WHERE slug=?", slug).Scan(&b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.QuotaUnlimited, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt)
+	e := s.db.QueryRowContext(ctx, "SELECT id,name,slug,visibility,quota_bytes,quota_unlimited,used_bytes,reserved_bytes,created_at,EXISTS(SELECT 1 FROM bucket_deletions d WHERE d.bucket_id=buckets.id) FROM buckets WHERE slug=?", slug).Scan(&b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.QuotaUnlimited, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt, &b.Deleting)
 	return b, e
 }
 func (s *Store) CreateBucket(ctx context.Context, b model.Bucket, totalLimit int64, platformUnlimited bool) (model.Bucket, error) {
@@ -148,8 +196,11 @@ func (s *Store) UpdateBucket(ctx context.Context, slug, name, visibility string,
 	}
 	defer tx.Rollback()
 	var b model.Bucket
-	if err = tx.QueryRowContext(ctx, "SELECT id,name,slug,visibility,quota_bytes,quota_unlimited,used_bytes,reserved_bytes,created_at FROM buckets WHERE slug=?", slug).Scan(&b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.QuotaUnlimited, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT id,name,slug,visibility,quota_bytes,quota_unlimited,used_bytes,reserved_bytes,created_at,EXISTS(SELECT 1 FROM bucket_deletions d WHERE d.bucket_id=buckets.id) FROM buckets WHERE slug=?", slug).Scan(&b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.QuotaUnlimited, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt, &b.Deleting); err != nil {
 		return b, err
+	}
+	if b.Deleting {
+		return b, ErrBucketDeleting
 	}
 	if !unlimited && quota < b.UsedBytes+b.ReservedBytes {
 		return b, errors.New("bucket quota cannot be lower than its used and reserved bytes")
@@ -210,14 +261,22 @@ func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
 	return os.ReadFile(name)
 }
 func (s *Store) CreateAccessKey(ctx context.Context, k model.AccessKey) error {
-	_, e := s.db.ExecContext(ctx, "INSERT INTO access_keys(id,bucket_id,name,ak,secret_cipher,permissions,created_at) VALUES(?,?,?,?,?,?,?)", k.ID, k.BucketID, k.Name, k.AK, k.SecretCipher, k.Permissions, k.CreatedAt)
-	return e
+	res, err := s.db.ExecContext(ctx, "INSERT INTO access_keys(id,bucket_id,name,ak,secret_cipher,permissions,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM buckets WHERE id=? AND NOT EXISTS(SELECT 1 FROM bucket_deletions WHERE bucket_id=?))", k.ID, k.BucketID, k.Name, k.AK, k.SecretCipher, k.Permissions, k.CreatedAt, k.BucketID, k.BucketID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err == nil && n == 0 {
+		return ErrBucketDeleting
+	}
+	return err
 }
+
 func (s *Store) AccessByAK(ctx context.Context, ak string) (model.AccessKey, model.Bucket, error) {
 	var k model.AccessKey
 	var b model.Bucket
 	var lastUsed sql.NullTime
-	e := s.db.QueryRowContext(ctx, `SELECT k.id,k.bucket_id,k.name,k.ak,k.secret_cipher,k.permissions,k.revoked,k.created_at,k.last_used_at,b.id,b.name,b.slug,b.visibility,b.quota_bytes,b.quota_unlimited,b.used_bytes,b.reserved_bytes,b.created_at FROM access_keys k JOIN buckets b ON b.id=k.bucket_id WHERE k.ak=?`, ak).Scan(&k.ID, &k.BucketID, &k.Name, &k.AK, &k.SecretCipher, &k.Permissions, &k.Revoked, &k.CreatedAt, &lastUsed, &b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.QuotaUnlimited, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt)
+	e := s.db.QueryRowContext(ctx, `SELECT k.id,k.bucket_id,k.name,k.ak,k.secret_cipher,k.permissions,k.revoked,k.created_at,k.last_used_at,b.id,b.name,b.slug,b.visibility,b.quota_bytes,b.quota_unlimited,b.used_bytes,b.reserved_bytes,b.created_at,EXISTS(SELECT 1 FROM bucket_deletions d WHERE d.bucket_id=b.id) FROM access_keys k JOIN buckets b ON b.id=k.bucket_id WHERE k.ak=? AND NOT EXISTS(SELECT 1 FROM bucket_deletions d WHERE d.bucket_id=b.id)`, ak).Scan(&k.ID, &k.BucketID, &k.Name, &k.AK, &k.SecretCipher, &k.Permissions, &k.Revoked, &k.CreatedAt, &lastUsed, &b.ID, &b.Name, &b.Slug, &b.Visibility, &b.QuotaBytes, &b.QuotaUnlimited, &b.UsedBytes, &b.ReservedBytes, &b.CreatedAt, &b.Deleting)
 	if lastUsed.Valid {
 		k.LastUsedAt = lastUsed.Time
 	}
@@ -289,6 +348,9 @@ func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt tim
 		return e
 	}
 	defer tx.Rollback()
+	if e = requireActiveBucket(ctx, tx, o.BucketID); e != nil {
+		return e
+	}
 	var pending int64
 	if e = tx.QueryRowContext(ctx, "SELECT count(*) FROM uploads WHERE bucket_id=?", o.BucketID).Scan(&pending); e != nil {
 		return e
@@ -342,6 +404,9 @@ func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt tim
 	if e != nil {
 		return e
 	}
+	if _, e = tx.ExecContext(ctx, "INSERT INTO upload_grants(id,bucket_id,expires_at) VALUES(?,?,?)", o.ID, o.BucketID, expiresAt); e != nil {
+		return e
+	}
 	_, e = tx.ExecContext(ctx, "UPDATE buckets SET reserved_bytes=reserved_bytes+? WHERE id=?", reserved, o.BucketID)
 	if e != nil {
 		return e
@@ -355,7 +420,7 @@ func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt tim
 }
 
 func (s *Store) ExpiredUploads(ctx context.Context, limit int) ([]model.Object, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,bucket_id,source_id,logical_key,physical_key,size,content_type,created_at FROM uploads WHERE expires_at<? ORDER BY expires_at LIMIT ?`, time.Now().UTC(), limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,bucket_id,source_id,logical_key,physical_key,size,content_type,created_at FROM uploads WHERE NOT EXISTS(SELECT 1 FROM bucket_deletions d WHERE d.bucket_id=uploads.bucket_id) AND expires_at<? ORDER BY expires_at LIMIT ?`, time.Now().UTC(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -413,6 +478,9 @@ func (s *Store) CommitUpload(ctx context.Context, upload model.Object, etag stri
 		return model.Object{}, "", "", e
 	}
 	defer tx.Rollback()
+	if e = requireActiveBucket(ctx, tx, upload.BucketID); e != nil {
+		return model.Object{}, "", "", e
+	}
 	var reserved, sourceReserved int64
 	if e = tx.QueryRowContext(ctx, "SELECT reserved_bytes,source_reserved_bytes FROM uploads WHERE id=?", upload.ID).Scan(&reserved, &sourceReserved); e != nil {
 		return model.Object{}, "", "", e
@@ -607,7 +675,7 @@ func (s *Store) PublicObject(ctx context.Context, slug string) (model.Object, in
 	var o model.Object
 	var ttl int64
 	var expiry sql.NullTime
-	e := s.db.QueryRowContext(ctx, `SELECT o.id,o.bucket_id,o.source_id,o.logical_key,o.physical_key,o.size,o.content_type,o.etag,o.status,o.generation,o.is_public,o.created_at,o.updated_at,l.sign_ttl_seconds,l.expires_at FROM public_links l JOIN objects o ON o.id=l.object_id JOIN buckets b ON b.id=o.bucket_id WHERE l.slug=? AND l.revoked=0 AND b.visibility='public'`, slug).Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt, &ttl, &expiry)
+	e := s.db.QueryRowContext(ctx, `SELECT o.id,o.bucket_id,o.source_id,o.logical_key,o.physical_key,o.size,o.content_type,o.etag,o.status,o.generation,o.is_public,o.created_at,o.updated_at,l.sign_ttl_seconds,l.expires_at FROM public_links l JOIN objects o ON o.id=l.object_id JOIN buckets b ON b.id=o.bucket_id WHERE l.slug=? AND l.revoked=0 AND b.visibility='public' AND NOT EXISTS(SELECT 1 FROM bucket_deletions d WHERE d.bucket_id=b.id)`, slug).Scan(&o.ID, &o.BucketID, &o.SourceID, &o.LogicalKey, &o.PhysicalKey, &o.Size, &o.ContentType, &o.ETag, &o.Status, &o.Generation, &o.Public, &o.CreatedAt, &o.UpdatedAt, &ttl, &expiry)
 	if e == nil && expiry.Valid && time.Now().After(expiry.Time) {
 		return o, ttl, errors.New("link expired")
 	}

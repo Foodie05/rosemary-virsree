@@ -14,6 +14,7 @@ type Backend interface {
 	PresignGet(context.Context, string, time.Duration, string) (string, error)
 	Head(context.Context, string) (Head, error)
 	Delete(context.Context, string) error
+	PurgePrefix(context.Context, string) error
 	Copy(context.Context, string, string) error
 	Put(context.Context, string, io.Reader, int64, string) error
 	Get(context.Context, string) (io.ReadCloser, Head, error)
