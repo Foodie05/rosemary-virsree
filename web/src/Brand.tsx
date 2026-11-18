@@ -6,7 +6,7 @@ export function Brand({ compact = false }: { compact?: boolean }) {
       {!compact && (
         <div>
           <strong>Arca</strong>
-          <span>by Rosemary</span>
+          <span>Rosemary</span>
         </div>
       )}
     </div>

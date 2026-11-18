@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 — 2026-11-18
+
+- Remove the decorative storage route from the login page and simplify the brand attribution to Rosemary.
+
 ## 0.4.0 — 2026-11-18
 
 - Reconcile the deployed Arca feature set with the public source: temporary upload invitations, upload-only Agent prompts, persistent idempotent receipts, public-bucket aliases, and technical Markdown reader. Preserve existing invitation tables, hashes, receipts, and application endpoints.

@@ -1701,13 +1701,6 @@ button.explorer-name .rm-button-content {
   color: var(--rm-navigation-muted);
   max-width: 540px;
 }
-.route-line {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  color: var(--rm-navigation-muted);
-  font-size: var(--rm-font-small);
-}
 .login-panel {
   position: relative;
   display: flex;
@@ -2148,9 +2141,6 @@ button.explorer-name .rm-button-content {
   }
   .login-panel {
     padding: 84px 24px 40px;
-  }
-  .route-line {
-    display: none;
   }
   .oobe > header {
     padding-inline: 16px;

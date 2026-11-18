@@ -279,7 +279,7 @@ export default function App() {
           {page === "settings" && <SettingsPage token="" />}
         </section>
         <footer className="app-footer">
-          Arca <span>by Rosemary · Forma 1.3</span>
+          Arca <span>Rosemary · Forma 1.3</span>
           <a href="#/docs">
             {msg("接入指南 ")}
             <ChevronRight />
@@ -340,13 +340,6 @@ function Login({ oidcReady }: { oidcReady: boolean }) {
               "把私有存储连接到应用。集中管理权限与容量，让文件直接抵达目的地。",
             )}
           </p>
-        </div>
-        <div className="route-line">
-          <span>{msg("应用")}</span>
-          <ChevronRight />
-          <span>Arca</span>
-          <ChevronRight />
-          <span>{msg("私有存储")}</span>
         </div>
       </div>
       <section className="login-panel">
