@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS bucket_deletions(bucket_id TEXT PRIMARY KEY,requested
 CREATE TABLE IF NOT EXISTS bucket_delete_confirmations(token_hash TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,ready_at DATETIME NOT NULL,expires_at DATETIME NOT NULL,FOREIGN KEY(bucket_id) REFERENCES buckets(id));
 CREATE TABLE IF NOT EXISTS bucket_cleanup_tombstones(bucket_id TEXT PRIMARY KEY,until_at DATETIME NOT NULL,next_at DATETIME NOT NULL);
 CREATE TABLE IF NOT EXISTS upload_grants(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,expires_at DATETIME NOT NULL,FOREIGN KEY(bucket_id) REFERENCES buckets(id));
+CREATE TABLE IF NOT EXISTS upload_invitations(id TEXT PRIMARY KEY,bucket_id TEXT NOT NULL,name TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,max_files INTEGER NOT NULL,allow_overwrite INTEGER NOT NULL,revoked INTEGER NOT NULL DEFAULT 0,expires_at DATETIME NOT NULL,created_at DATETIME NOT NULL,FOREIGN KEY(bucket_id) REFERENCES buckets(id));
+CREATE TABLE IF NOT EXISTS invitation_uploads(upload_id TEXT PRIMARY KEY,invitation_id TEXT NOT NULL,object_key TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',object_id TEXT NOT NULL DEFAULT '',public_slug TEXT NOT NULL DEFAULT '',FOREIGN KEY(invitation_id) REFERENCES upload_invitations(id));
+CREATE INDEX IF NOT EXISTS invitation_uploads_owner ON invitation_uploads(invitation_id,status);
 CREATE INDEX IF NOT EXISTS objects_bucket ON objects(bucket_id,status);
 CREATE INDEX IF NOT EXISTS objects_bucket_key ON objects(bucket_id,status,logical_key);
 CREATE INDEX IF NOT EXISTS uploads_expiry ON uploads(expires_at);
@@ -344,6 +347,12 @@ func (s *Store) ClaimBootstrap(ctx context.Context, hash string) (model.Bootstra
 	return t, tx.Commit()
 }
 func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt time.Time, maxObjects, maxPending int64) error {
+	return s.reserveObject(ctx, o, expiresAt, maxObjects, maxPending, "")
+}
+func (s *Store) ReserveInvitationObject(ctx context.Context, o model.Object, expiresAt time.Time, maxObjects, maxPending int64, invitationID string) error {
+	return s.reserveObject(ctx, o, expiresAt, maxObjects, maxPending, invitationID)
+}
+func (s *Store) reserveObject(ctx context.Context, o model.Object, expiresAt time.Time, maxObjects, maxPending int64, invitationID string) error {
 	tx, e := s.db.BeginTx(ctx, nil)
 	if e != nil {
 		return e
@@ -351,6 +360,11 @@ func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt tim
 	defer tx.Rollback()
 	if e = requireActiveBucket(ctx, tx, o.BucketID); e != nil {
 		return e
+	}
+	if invitationID != "" {
+		if e = invitationReserve(ctx, tx, invitationID, o); e != nil {
+			return e
+		}
 	}
 	var pending int64
 	if e = tx.QueryRowContext(ctx, "SELECT count(*) FROM uploads WHERE bucket_id=?", o.BucketID).Scan(&pending); e != nil {
@@ -414,6 +428,11 @@ func (s *Store) ReserveObject(ctx context.Context, o model.Object, expiresAt tim
 	}
 	if o.SourceID != "" {
 		if _, e = tx.ExecContext(ctx, "UPDATE storage_sources SET reserved_bytes=reserved_bytes+? WHERE id=?", sourceReserved, o.SourceID); e != nil {
+			return e
+		}
+	}
+	if invitationID != "" {
+		if _, e = tx.ExecContext(ctx, "INSERT INTO invitation_uploads(upload_id,invitation_id,object_key) VALUES(?,?,?)", o.ID, invitationID, o.LogicalKey); e != nil {
 			return e
 		}
 	}
@@ -482,6 +501,9 @@ func (s *Store) CommitUpload(ctx context.Context, upload model.Object, etag stri
 	if e = requireActiveBucket(ctx, tx, upload.BucketID); e != nil {
 		return model.Object{}, "", "", e
 	}
+	if e = invitationCommit(ctx, tx, upload); e != nil {
+		return model.Object{}, "", "", e
+	}
 	var reserved, sourceReserved int64
 	if e = tx.QueryRowContext(ctx, "SELECT reserved_bytes,source_reserved_bytes FROM uploads WHERE id=?", upload.ID).Scan(&reserved, &sourceReserved); e != nil {
 		return model.Object{}, "", "", e
@@ -523,6 +545,9 @@ func (s *Store) CommitUpload(ctx context.Context, upload model.Object, etag stri
 		if _, e = tx.ExecContext(ctx, "UPDATE storage_sources SET used_bytes=MAX(0,used_bytes-?) WHERE id=?", old.Size, old.SourceID); e != nil {
 			return model.Object{}, "", "", e
 		}
+	}
+	if e = invitationReceipt(ctx, tx, upload.ID, objectID, upload.BucketID); e != nil {
+		return model.Object{}, "", "", e
 	}
 	if e = tx.Commit(); e != nil {
 		return model.Object{}, "", "", e

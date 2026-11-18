@@ -147,6 +147,8 @@ func (s *Store) FinishBucketDeletion(ctx context.Context, id string) error {
 		return err
 	}
 	queries := []string{
+		`DELETE FROM invitation_uploads WHERE invitation_id IN(SELECT id FROM upload_invitations WHERE bucket_id=?)`,
+		`DELETE FROM upload_invitations WHERE bucket_id=?`,
 		`DELETE FROM public_links WHERE object_id IN(SELECT id FROM objects WHERE bucket_id=?)`,
 		`DELETE FROM transfer_tokens WHERE object_id IN(SELECT id FROM objects WHERE bucket_id=?)`,
 		`DELETE FROM bucket_delete_confirmations WHERE bucket_id=?`, `DELETE FROM access_keys WHERE bucket_id=?`, `DELETE FROM uploads WHERE bucket_id=?`,

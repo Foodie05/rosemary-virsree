@@ -18,6 +18,14 @@ type localizedError struct {
 func errorFor(raw string, status int) localizedError {
 	message := strings.ToLower(raw)
 	switch {
+	case strings.Contains(message, "upload_invitation_inactive"):
+		return localizedError{"upload_invitation_inactive", "临时上传授权已过期、被撤销或无效，请向管理员申请新授权。", "The upload invitation has expired, been revoked, or is invalid. Request a new invitation."}
+	case strings.Contains(message, "upload_invitation_ownership"):
+		return localizedError{"upload_invitation_ownership", "此上传不属于当前授权，请检查 upload_id 和对象键。", "This upload does not belong to the invitation. Check the upload ID and object key."}
+	case strings.Contains(message, "upload_invitation_limit"):
+		return localizedError{"upload_invitation_limit", "已达到授权的文件数量上限，正在上传的文件也占用名额。", "The invitation file limit has been reached, including pending uploads."}
+	case strings.Contains(message, "upload_overwrite_denied"):
+		return localizedError{"upload_overwrite_denied", "此授权禁止覆盖已有同名对象，请勿擅自改名绕过限制。", "This invitation cannot overwrite an existing object. Do not silently rename the file to bypass the restriction."}
 	case strings.Contains(message, "bucket name confirmation does not match"):
 		return localizedError{"bucket_name_mismatch", "桶名不匹配。请完整输入桶的 S3 名称，大小写和空格必须完全一致。", "The bucket name does not match. Enter the full S3 bucket name exactly, including case and whitespace."}
 	case strings.Contains(message, "bucket deletion confirmation wait"):
@@ -42,7 +50,7 @@ func errorFor(raw string, status int) localizedError {
 	case strings.Contains(message, "bitiful cdn authentication key is required"):
 		return localizedError{"storage_cdn_key_required", "使用缤纷云高级鉴权时必须填写 CDN 鉴权 Key。请从缤纷云 CDN 项目的“高级鉴权”配置中取得该 Key。", "Bitiful advanced authentication requires the CDN authentication key. Copy it from Advanced Authentication in the Bitiful CDN project."}
 	case strings.Contains(message, "storage verification failed") && strings.Contains(message, "download probe") && (strings.Contains(message, "403 forbidden") || strings.Contains(message, "accessdenied") || strings.Contains(message, "signaturedoesnotmatch")):
-		return localizedError{"storage_cdn_access_denied", "已连接到下载 CDN，但验证链接被拒绝。请确认所选鉴权方式与 CDN 项目一致，并检查 CDN 鉴权 Key、回源桶和回源路径。", "VirSree reached the download CDN, but the verification URL was rejected. Confirm that the selected authentication mode matches the CDN project, then check the CDN key, origin bucket, and origin path."}
+		return localizedError{"storage_cdn_access_denied", "已连接到下载 CDN，但验证链接被拒绝。请确认所选鉴权方式与 CDN 项目一致，并检查 CDN 鉴权 Key、回源桶和回源路径。", "Arca reached the download CDN, but the verification URL was rejected. Confirm that the selected authentication mode matches the CDN project, then check the CDN key, origin bucket, and origin path."}
 	case strings.Contains(message, "storage verification failed") && strings.Contains(message, "download probe") && (strings.Contains(message, "deadline exceeded") || strings.Contains(message, "timeout") || strings.Contains(message, "no such host") || strings.Contains(message, "connection refused")):
 		return localizedError{"storage_cdn_unreachable", "下载 CDN 没有在限定时间内完成验证。存储 API 可能仍然正常；请单独检查 CDN 地址、DNS、防火墙和回源配置。", "The download CDN did not complete verification in time. The storage API may still be healthy; check the CDN endpoint, DNS, firewall, and origin configuration."}
 	case strings.Contains(message, "storage verification failed") && strings.Contains(message, "download probe"):
@@ -50,17 +58,17 @@ func errorFor(raw string, status int) localizedError {
 	case strings.Contains(message, "storage verification failed") && strings.Contains(message, "direct upload probe"):
 		return localizedError{"storage_upload_failed", "直传验证失败。请检查公开上传 Endpoint、桶 CORS、写入权限和 Path-style 设置。", "The direct-upload check failed. Check the public upload endpoint, bucket CORS, write permission, and path-style setting."}
 	case strings.Contains(message, "storage verification failed") && (strings.Contains(message, "statuscode: 404") || strings.Contains(message, "notfound") || strings.Contains(message, "404 not found")):
-		return localizedError{"storage_probe_not_found", "VirSree 已连接到存储服务，但找不到刚上传的验证对象。请检查桶名、Endpoint 和 Path-style 设置是否匹配。", "VirSree reached the storage service but could not find the verification object it just uploaded. Check the bucket name, endpoint, and path-style setting."}
+		return localizedError{"storage_probe_not_found", "Arca 已连接到存储服务，但找不到刚上传的验证对象。请检查桶名、Endpoint 和 Path-style 设置是否匹配。", "Arca reached the storage service but could not find the verification object it just uploaded. Check the bucket name, endpoint, and path-style setting."}
 	case strings.Contains(message, "storage verification failed") && (strings.Contains(message, "accessdenied") || strings.Contains(message, "statuscode: 403") || strings.Contains(message, "signaturedoesnotmatch") || strings.Contains(message, "invalidaccesskeyid")):
 		return localizedError{"storage_access_denied", "存储服务拒绝了验证请求。请检查 AK/SK、桶权限、Region，以及服务器时间是否正确。", "The storage service rejected the verification request. Check the access keys, bucket permissions, region, and server clock."}
 	case strings.Contains(message, "endpoint format is invalid") || strings.Contains(message, "not a valid uri") || strings.Contains(message, "invalid webdav endpoint"):
-		return localizedError{"storage_endpoint_invalid", "无法识别存储地址。可以只填写域名，VirSree 会自动补全 HTTPS；也可以填写完整的 HTTP(S) URL。", "The storage endpoint is not recognized. Enter only the domain and VirSree will add HTTPS, or enter a complete HTTP(S) URL."}
+		return localizedError{"storage_endpoint_invalid", "无法识别存储地址。可以只填写域名，Arca 会自动补全 HTTPS；也可以填写完整的 HTTP(S) URL。", "The storage endpoint is not recognized. Enter only the domain and Arca will add HTTPS, or enter a complete HTTP(S) URL."}
 	case strings.Contains(message, "storage verification failed") && (strings.Contains(message, "deadline exceeded") || strings.Contains(message, "timeout") || strings.Contains(message, "no such host") || strings.Contains(message, "connection refused")):
-		return localizedError{"storage_unreachable", "无法在限定时间内连接存储服务。请检查地址、DNS、防火墙和网络访问策略。", "VirSree could not reach the storage service in time. Check the endpoint, DNS, firewall, and network access policy."}
+		return localizedError{"storage_unreachable", "无法在限定时间内连接存储服务。请检查地址、DNS、防火墙和网络访问策略。", "Arca could not reach the storage service in time. Check the endpoint, DNS, firewall, and network access policy."}
 	case strings.Contains(message, "storage verification failed"):
 		return localizedError{"storage_verification_failed", "存储源验证没有通过。请核对连接信息和读、写、复制、删除权限，然后使用追踪编号查看服务器日志。", "Storage verification failed. Check the connection settings and read, write, copy, and delete permissions, then use the trace ID to inspect server logs."}
 	case strings.Contains(message, "oidc") && strings.Contains(message, "not configured"):
-		return localizedError{"oidc_not_configured", "VirSree 尚未配置身份登录，请由管理员运行生产配置脚本。", "Identity sign-in has not been configured for VirSree. Ask an administrator to run the production configuration script."}
+		return localizedError{"oidc_not_configured", "Arca 尚未配置身份登录，请由管理员运行生产配置脚本。", "Identity sign-in has not been configured for Arca. Ask an administrator to run the production configuration script."}
 	case strings.Contains(message, "json") || strings.Contains(message, "unexpected eof"):
 		return localizedError{"invalid_json", "请求内容不是有效的 JSON。", "The request body is not valid JSON."}
 	case strings.Contains(message, "admin authentication required"):
@@ -80,7 +88,7 @@ func errorFor(raw string, status int) localizedError {
 	case status == http.StatusUnauthorized:
 		return localizedError{"authentication_required", "需要先完成身份验证。", "Authentication is required."}
 	case status >= 500:
-		return localizedError{"internal_error", "VirSree 暂时无法完成请求，请稍后重试；如问题持续，请使用追踪编号检查日志。", "VirSree could not complete the request. Try again later and use the trace ID to inspect logs if the problem continues."}
+		return localizedError{"internal_error", "Arca 暂时无法完成请求，请稍后重试；如问题持续，请使用追踪编号检查日志。", "Arca could not complete the request. Try again later and use the trace ID to inspect logs if the problem continues."}
 	default:
 		return localizedError{"request_failed", "请求没有完成，请检查输入后重试。", "The request could not be completed. Check the input and try again."}
 	}

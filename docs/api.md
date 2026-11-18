@@ -1,13 +1,13 @@
 # Gateway API
 
-The examples use one gateway origin, such as `https://storage.example.com`. Send the user's locale in `Accept-Language`. VirSree chooses Chinese for languages beginning with `zh` and English otherwise, while always returning both translations:
+The examples use one gateway origin, such as `https://storage.example.com`. Send the user's locale in `Accept-Language`. Rosemary Arca chooses Chinese for languages beginning with `zh` and English otherwise, while always returning both translations:
 
 ```json
 {
-  "error": "VirSree 已连接到存储服务，但找不到刚上传的验证对象……",
+  "error": "Rosemary Arca 已连接到存储服务，但找不到刚上传的验证对象……",
   "code": "storage_probe_not_found",
-  "message_zh": "VirSree 已连接到存储服务，但找不到刚上传的验证对象……",
-  "message_en": "VirSree reached the storage service but could not find the verification object…",
+  "message_zh": "Rosemary Arca 已连接到存储服务，但找不到刚上传的验证对象……",
+  "message_en": "Rosemary Arca reached the storage service but could not find the verification object…",
   "trace_id": "req_..."
 }
 ```
@@ -54,7 +54,7 @@ The `/s3` routes use AWS Signature Version 4 with the virtual AK/SK. Permissions
 | `POST` | `/api/v1/admin/buckets/{bucket}/objects/invalidate-links` | Rotate one physical key |
 | `DELETE` | `/api/v1/admin/buckets/{bucket}/objects/{key...}` | Delete one object |
 
-An update completes the same full data-plane probe as creation before any persisted or runtime configuration changes. Empty credential fields retain the existing encrypted values. A failed probe leaves the active source untouched. Changing an S3 physical bucket requires `acknowledge_bucket_change: true`; clients should show a clear data-availability warning because VirSree does not move existing objects to the new bucket.
+An update completes the same full data-plane probe as creation before any persisted or runtime configuration changes. Empty credential fields retain the existing encrypted values. A failed probe leaves the active source untouched. Changing an S3 physical bucket requires `acknowledge_bucket_change: true`; clients should show a clear data-availability warning because Rosemary Arca does not move existing objects to the new bucket.
 
 The console embeds its release version at build time and compares it with `/api/v1/version` on startup, once per minute, and whenever the tab regains focus. A mismatch reloads the page through a versioned cache-busting URL after open forms, risk dialogs and one-time credentials have been safely dismissed. The version endpoint and SPA HTML use `no-store`; fingerprinted `/assets/` files use a one-year immutable cache policy.
 
@@ -81,7 +81,7 @@ Create bootstrap token body:
 
 `expires_in` here is the lifetime of the one-time onboarding token. It is separate from object signature lifetimes.
 
-S3 storage-source endpoints are SDK service endpoints, such as `https://s3.example.com`. If an operator pastes a standard bucket-scoped host such as `https://media.s3.example.com` while the bucket field is `media`, VirSree removes the duplicated bucket label before verification. New cloud sources default to virtual-hosted addressing; enable Path-style explicitly for MinIO or another provider that requires it.
+S3 storage-source endpoints are SDK service endpoints, such as `https://s3.example.com`. If an operator pastes a standard bucket-scoped host such as `https://media.s3.example.com` while the bucket field is `media`, Rosemary Arca removes the duplicated bucket label before verification. New cloud sources default to virtual-hosted addressing; enable Path-style explicitly for MinIO or another provider that requires it.
 
 ## Agent exchange
 
@@ -111,9 +111,9 @@ It returns the gateway S3 endpoint, virtual bucket, region, virtual AK/SK, and p
 | `manage` | `POST` | `/api/v1/buckets/{bucket}/objects/invalidate-links` | `key` |
 | `delete` | `DELETE` | `/api/v1/buckets/{bucket}/objects/{key...}` | none |
 
-Every capability request requires an application-selected positive expiry. S3-compatible backends using SigV4 cap it at 604800 seconds. VirSree does not shorten a valid requested duration. Responses include `direct`: S3 is `true`; generic WebDAV is `false` because the capability URL relays bytes through VirSree.
+Every capability request requires an application-selected positive expiry. S3-compatible backends using SigV4 cap it at 604800 seconds. Rosemary Arca does not shorten a valid requested duration. Responses include `direct`: S3 is `true`; generic WebDAV is `false` because the capability URL relays bytes through Rosemary Arca.
 
-Only virtual buckets in `public` mode can create and resolve `/p/` public aliases. Switching a virtual bucket to `private` immediately stops its existing aliases from redirecting; per-request signed downloads remain available to authorized keys. The backing storage source stays private in both modes. The public-link response contains `slug`, `public_url`, and `direct_url`. `public_url` is a VirSree alias that can keep working until `link_expires_in`; each visit redirects to a new real URL valid for `sign_expires_in`. Revoke it with the `slug`. Already issued `direct_url` values bypass VirSree and remain usable until their chosen expiry unless the object physical key is rotated.
+Only virtual buckets in `public` mode can create and resolve `/p/` public aliases. Switching a virtual bucket to `private` immediately stops its existing aliases from redirecting; per-request signed downloads remain available to authorized keys. The backing storage source stays private in both modes. The public-link response contains `slug`, `public_url`, and `direct_url`. `public_url` is a Rosemary Arca alias that can keep working until `link_expires_in`; each visit redirects to a new real URL valid for `sign_expires_in`. Revoke it with the `slug`. Already issued `direct_url` values bypass Rosemary Arca and remain usable until their chosen expiry unless the object physical key is rotated.
 
 ## S3 endpoint
 
@@ -149,6 +149,43 @@ For administrator automation:
 
 At acceptance, keys and public aliases are revoked and new signing, uploads, commits, edits and key creation are blocked. Background cleanup sweeps both `rosemary/{bucket_id}/` and `rosemary-staging/{bucket_id}/` across every configured source, including disabled sources, removing untracked staging files and superseded keys as well as mapped objects. S3 sources are also swept for historical versions and delete markers; an explicitly unsupported version API falls back to ordinary object listing. Source credentials need list and delete permissions, plus `ListBucketVersions` and `DeleteObjectVersion` if the provider supports versioning. Object Lock, retention policies, permission denials and WebDAV partial failures leave the job incomplete for automatic retry; no success is reported and metadata is retained.
 
-A direct PUT signature can still write its staging key after commit. VirSree therefore retains upload-grant receipts, sweeps while those signatures remain valid, and performs final cleanup after the last expiry plus a 60-second transfer grace period. During upgrade from releases without receipts, recently signed uploads conservatively use the seven-day SigV4 upper bound from their audit timestamp. New signatures retain their exact application-selected expiry. Jobs resume after service restart or browser disconnection. Because S3 checks expiry when a PUT starts, a large transfer can finish later; after completion, an opaque namespace tombstone schedules staging-only sweeps every 15 minutes for seven more days. This removes late arrivals without retaining bucket credentials or object mappings. The final tombstone sweep must succeed before that housekeeping record is removed.
+A direct PUT signature can still write its staging key after commit. Rosemary Arca therefore retains upload-grant receipts, sweeps while those signatures remain valid, and performs final cleanup after the last expiry plus a 60-second transfer grace period. During upgrade from releases without receipts, recently signed uploads conservatively use the seven-day SigV4 upper bound from their audit timestamp. New signatures retain their exact application-selected expiry. Jobs resume after service restart or browser disconnection. Because S3 checks expiry when a PUT starts, a large transfer can finish later; after completion, an opaque namespace tombstone schedules staging-only sweeps every 15 minutes for seven more days. This removes late arrivals without retaining bucket credentials or object mappings. The final tombstone sweep must succeed before that housekeeping record is removed.
 
 Only after all source sweeps succeed does one database transaction remove objects, upload reservations and grants, transfer tokens, public links, virtual credentials, confirmation records and the bucket; it also releases each source's used/reserved accounting and the bucket's allocated quota. Other virtual buckets, physical buckets/collections and `virsree-system/` backups remain intact. Audit records remain as an operation history. Previously downloaded copies, CDN caches, provider recovery facilities and encrypted rolling backup snapshots are outside the live bucket cleanup: refresh CDN caches at the provider, and let snapshots rotate under the configured retention policy. This is operational deletion, not a guarantee of forensic erasure.
+
+## Temporary upload invitations
+
+These invitations grant upload-only access to **one existing bucket**, without issuing virtual AK/SK. They cannot list/read/delete objects or change buckets, keys, permissions, or public links. Authentication uses `Authorization: Bearer rvs_au_...`, never a URL query parameter. Send it only to the gateway invitation endpoints; do not forward it to the signed storage PUT URL.
+
+### Administrator endpoints
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/admin/buckets/{bucket}/upload-invitations` | List policies, completed/pending counts and revocation state; never tokens |
+| POST | `/api/v1/admin/buckets/{bucket}/upload-invitations` | Create an invitation; token is returned once |
+| DELETE | `/api/v1/admin/buckets/{bucket}/upload-invitations/{id}` | Revoke new reservations and commits; preserve committed files |
+
+Creation body:
+
+```json
+{"name":"Release attachments","max_files":3,"expires_in":3600,"allow_overwrite":false}
+```
+
+`max_files` is an integer from 0 to 1000000; **0 means unlimited file count**, subject to existing bucket/source quotas and platform limits. `expires_in` is 60–604800 seconds. Names are required and at most 160 UTF-8 bytes. Creation returns `token`, `invitation`, `upload_url`, `bucket`, `visibility`, and `shown_once: true`. Store only the token hash server-side. Responses containing credentials use `Cache-Control: no-store`.
+
+### Agent endpoints and sequence
+
+1. `GET /api/v1/agent/uploads`: inspect the bucket, visibility, expiry, overwrite rule and file counters.
+2. `POST /api/v1/agent/uploads` with `{"key":"reports/result.pdf","size":123,"content_type":"application/pdf"}`. Returns `upload_id`, `url`, `method`, `required_headers`, `expires_in`, `direct` and `commit_url`. Follow these exact transfer instructions. Each reservation lasts at most 15 minutes and never exceeds invitation expiry.
+3. PUT the file bytes to `url`. Include the returned required headers. **Do not send the invitation Bearer token to this URL.** S3 remains direct; WebDAV uses the existing relay.
+4. After a successful PUT, POST `{"upload_id":"...","key":"reports/result.pdf"}` to `/api/v1/agent/uploads/commit` with the invitation Bearer token. Returns `object` and `public_url` (empty for private buckets). Repeating a successful commit with the same ID/key returns its receipt without consuming another slot.
+
+Committed uploads and active pending reservations count toward the file limit. Expired reservations and failed signing do not consume invitation slots; normal storage cleanup and quota accounting still apply. Overwriting, when allowed, counts as another completed upload. With `allow_overwrite: false`, an existing object key is rejected both at reservation and atomically at commit; parallel requests cannot bypass the file limit.
+
+A public bucket receives a permanent `/p/{slug}` alias **without automatic expiry**. It still stops resolving if the object is deleted, the link is revoked, or the bucket becomes private. The underlying S3/CDN redirect remains short-lived and is refreshed by the stable alias. A private bucket never receives a public URL from this flow.
+
+Failures include `upload_invitation_inactive` (403), `upload_invitation_ownership` (403), `upload_invitation_limit` (409), and `upload_overwrite_denied` (409). Revocation/expiry block commits even for already signed uploads; a previously issued PUT may still write staging data until its own expiry but cannot publish an object. Do not silently rename conflicts or bypass overwrite restrictions.
+
+## Reading technical documents
+
+The existing `/docs/*.md` URLs provide the branded document reader for browser requests accepting `text/html`. Command-line requests continue receiving raw Markdown. Use `?raw=1` to force Markdown, and `?raw=1&download=1` for a downloadable source document. Responses vary by `Accept`; browser HTML is never stored as an immutable asset.

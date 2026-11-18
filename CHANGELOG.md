@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 — 2026-11-18
+
+- Reconcile the deployed Arca feature set with the public source: temporary upload invitations, upload-only Agent prompts, persistent idempotent receipts, public-bucket aliases, and technical Markdown reader. Preserve existing invitation tables, hashes, receipts, and application endpoints.
+- Rebuild the console with Rosemary Forma 1.3 / official SDK 0.5.0: semantic light/dark themes, cohesive motion, accessible dialogs and loading states, mobile navigation, object browsing, source editing, and guarded two-stage bucket deletion.
+- Preserve Chinese/English language preference and system appearance. Keep one-time credentials and unfinished operations protected from automatic refresh.
+- Add invitation authorization/concurrency/cleanup tests, a protected database-snapshot compatibility preflight, and twelve browser interaction/accessibility tests.
+
+
 ## v0.3.3 — 2026-09-23
 
 - Derive the gateway origin from the `AWS_ENDPOINT_URL` written by `rvsctl` in the console's cURL, TypeScript and Python upload examples.

@@ -215,6 +215,9 @@ func stagingPhysical(b model.Bucket, uploadID, key string) string {
 	return fmt.Sprintf("rosemary-staging/%s/%s/%s", b.ID, uploadID, strings.TrimPrefix(key, "/"))
 }
 func (s *Service) BeginUpload(ctx context.Context, c Credential, key, contentType string, size, expires int64) (model.Object, string, error) {
+	return s.beginUpload(ctx, c, key, contentType, size, expires, "")
+}
+func (s *Service) beginUpload(ctx context.Context, c Credential, key, contentType string, size, expires int64, invitationID string) (model.Object, string, error) {
 	unlock, err := s.BucketOperation(ctx, c.Bucket.ID)
 	if err != nil {
 		return model.Object{}, "", err
@@ -238,7 +241,13 @@ func (s *Service) BeginUpload(ctx context.Context, c Credential, key, contentTyp
 	for _, candidate := range s.Storage.candidates() {
 		o.SourceID = candidate.meta.ID
 		o.PhysicalKey = stagingPhysical(c.Bucket, o.ID, o.LogicalKey)
-		if e = s.DB.ReserveObject(ctx, o, time.Now().Add(time.Duration(expires)*time.Second), s.Config.MaxObjectsPerBucket, s.Config.MaxPendingUploads); e == nil {
+		expiry := time.Now().Add(time.Duration(expires) * time.Second)
+		if invitationID == "" {
+			e = s.DB.ReserveObject(ctx, o, expiry, s.Config.MaxObjectsPerBucket, s.Config.MaxPendingUploads)
+		} else {
+			e = s.DB.ReserveInvitationObject(ctx, o, expiry, s.Config.MaxObjectsPerBucket, s.Config.MaxPendingUploads, invitationID)
+		}
+		if e == nil {
 			b = candidate.backend
 			break
 		}
